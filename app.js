@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -343,7 +343,7 @@ function normLine(raw) {
   s = s.replace(/[−‐-―]/g, '-').replace(/[▲△]\s*(?=[¥\\]?\d)/g, '-');
   s = s.replace(/\\/g, '¥');
   s = s.replace(/([^A-Za-z\d]|^)[Yy]{1,2}(?=\s?¥?\d)/g, '$1¥').replace(/¥{2,}/g, '¥');
-  for (let i = 0; i < 3; i++) s = s.replace(/(\d)[.,](\d{3})(?!\d)/g, '$1$2');
+  for (let i = 0; i < 3; i++) s = s.replace(/(\d)\s?[.,。、]\s?(\d{3})(?!\d)/g, '$1$2');
   s = s.replace(new RegExp(`([${CJK}])\\s+(?=[${CJK}])`, 'g'), '$1');
   s = s.split(/(\s+)/).map(t => /\s/.test(t) ? t : fixNumToken(t)).join('');
   return s.replace(/[ \t]+/g, ' ').trim();
@@ -361,7 +361,7 @@ function findDate(l, now) {
   if ((m = l.match(/(?:^|[^\d])(\d{2})[\/.](\d{1,2})[\/.](\d{1,2})(?!\d)/))) return validDate(2000 + +m[1], +m[2], +m[3], now);
   return null;
 }
-const HEADER_RE = /(TEL|Tel|電話|FAX|〒|レジ|担当|取引|伝票|会員|責任者|領収|レシート|登録番号|No\.|http|www\.|\d{1,2}:\d{2}|\d{2,4}-\d{2,4}-\d{3,4}|\d{4}\s*[年\/.]\s*\d{1,2}\s*[月\/.]|ありがとう|またお越し|ご来店)/i;
+const HEADER_RE = /(店舗\s*[#＃]|端末\s*[#＃]|扱者|責任|[#＃]\s*\d{3,}|ランク|TEL|Tel|電話|FAX|〒|レジ|担当|取引|伝票|会員|責任者|領収|レシート|登録番号|No\.|http|www\.|\d{1,2}:\d{2}|\d{2,4}-\d{2,4}-\d{3,4}|\d{4}\s*[年\/.]\s*\d{1,2}\s*[月\/.]|ありがとう|またお越し|ご来店)/i;
 const END_RE = /^(小計|合計|総合計|お?買上|お会計|ご?請求|お預|お釣|おつり|釣銭|釣り|税込|対象|外税|内税|内消費税|消費税|クレジット|現金|カード|電子マネー|支払|ポイント|点数|\(?\d+%対象)/;
 const QTY_RE = /^\s*(\d+\s*(コ|個|点|本|袋|枚|パック)?\s*[xX×@*]|[@*]\s*\d|単\s*\d)/;
 const DISC_RE = /(値引|割引|クーポン|値下|ポイント利用|ポイント値引|割\s*$|引\s*$)/;
@@ -373,7 +373,7 @@ function lastAmount(l) {
   const toks = l.split(/\s+/);
   const t = toks[toks.length - 1] || '';
   const m = t.match(/^(.*?)¥?(-?)¥?(\d{1,7})(-?)円?$/);
-  if (!m || /\d/.test(m[1])) return null;
+  if (!m || (/\d/.test(m[1]) && !/[぀-ヿ㐀-鿿]$/.test(m[1]))) return null;      // 「科420」のように文字と金額がくっついた読み取りは許す
   return {amount: Number(m[3]), neg: m[2] === '-' || m[4] === '-', head: toks.slice(0, -1).join(' ') + (m[1] ? ' ' + m[1] : '')};
 }
 function matchItem(l) {
@@ -385,6 +385,9 @@ function matchItem(l) {
   let label = la.head.replace(/^\d{3,}\s+/, '').replace(/^[*・●○◆◇▪]\s*/, '').replace(/\s+/g, ' ').trim();
   if (!hasLetter(label) || label.length > 40) return null;
   if (la.amount <= 0 || la.amount > 9999999) return null;
+  const nLetters = (label.match(/[A-Za-z぀-ヿ㐀-鿿]/g) || []).length;
+  const hasYen = /¥\s*-?\d/.test(s);
+  if (nLetters < 2 || (!hasYen && la.amount < 10)) return null;     // 「装 5」のような読み違いを品目にしない
   const neg = la.neg || DISC_RE.test(label);
   return {label, amount: la.amount, neg};
 }
@@ -410,21 +413,44 @@ function parseReceipt(text, now) {
   const info = {date:null, store:'', items:[], total:null, pay:detectPay(text), lines};
   const used = new Set();
   for (let i = 0; i < lines.length; i++) { const d = findDate(lines[i], now); if (d) { info.date = d; used.add(i); break; } }
-  for (let i = 0; i < Math.min(lines.length, 8); i++) {
-    if (isStoreLine(lines[i])) { info.store = lines[i].replace(/^(店名|店)[:：]\s*/, '').slice(0, 24); used.add(i); break; }
+  const cjkN = l => (l.match(/[぀-ヿ㐀-鿿]/g) || []).length;
+  let si = -1;
+  for (let i = 1; i < Math.min(lines.length, 16) && si < 0; i++) {                // 電話番号の行の直前が店名のことが多い
+    if (/(TEL|Tel|電話|\d{2,4}-\d{2,4}-\d{3,4})/.test(lines[i])) {
+      for (let j = i - 1; j >= Math.max(0, i - 2); j--) if (isStoreLine(lines[j]) && cjkN(lines[j]) >= 3) { si = j; break; }
+      break;
+    }
   }
+  if (si < 0) for (let i = 0; i < Math.min(lines.length, 10); i++) {
+    if (/(店|院|クリニック|薬局|カフェ|マート|ストア|食堂|ホテル|ドラッグ)/.test(lines[i]) && isStoreLine(lines[i])) { si = i; break; }
+  }
+  if (si < 0) for (let i = 0; i < Math.min(lines.length, 8); i++) {
+    if (isStoreLine(lines[i]) && (lines[i].match(/[A-Za-z぀-ヿ㐀-鿿]/g) || []).length >= 3) { si = i; break; }
+  }
+  if (si >= 0) { info.store = lines[si].replace(/^(店名|店)[:：]\s*/, '').slice(0, 24); used.add(si); }
   let started = false, ended = false;
+  const firstEnd = lines.findIndex(l => END_RE.test(l));
+  const dateIdx = lines.findIndex(l => findDate(l, now));
+  const from = dateIdx >= 0 && (firstEnd < 0 || dateIdx < firstEnd) ? dateIdx + 1 : 0;   // 日付が上にあるレシートは、その下から品目
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     if (info.total === null && TOTAL_RE.test(l) && !NOT_TOTAL_RE.test(l)) {
       const la = lastAmount(l);
-      if (la && la.amount > 0) info.total = la.amount;
+      if (la && la.amount > 0) { info.total = la.amount; ended = true; }   // 合計より下は品目ではない
     }
-    if (ended || used.has(i)) continue;
+    if (ended || used.has(i) || i < from) continue;
     if (END_RE.test(l)) { if (started) ended = true; continue; }
     if (HEADER_RE.test(l)) continue;
     const it = matchItem(l);
     if (it) { info.items.push(it); started = true; }
+  }
+  if (info.total === null) {                                    // 合計が読めないとき：支払いの行の金額 → なければ品目の合計
+    for (const l of lines) {
+      if (/(クレジット|JCB|VISA|カード|電子マネー|QUICPay|現金|PayPay|お支払)/i.test(l) && !/(ポイント|番号|\*{3})/.test(l)) {
+        const la = lastAmount(l);
+        if (la && la.amount >= 10) { info.total = la.amount; break; }
+      }
+    }
   }
   return info;
 }
@@ -1186,93 +1212,257 @@ function loadImage(file) {
     img.src = url;
   });
 }
-/* 白黒にして、影や照明のムラをならす。文字認識の精度を上げるための下処理 */
-async function preprocessImage(file, mode) {
-  mode = mode || 'gray';
+/* 写真の中からレシート（明るい紙の部分）を探す。背景の模様を文字として読まないための切り出し。
+   見つかれば、傾きと切り出し範囲を返す。見つからない・全面が紙のときは null */
+function segmentReceipt(img) {
+  const W = img.naturalWidth, H = img.naturalHeight;
+  const k = 360 / Math.max(W, H);
+  const sw = Math.max(8, Math.round(W * k)), sh = Math.max(8, Math.round(H * k));
+  const cv = document.createElement('canvas'); cv.width = sw; cv.height = sh;
+  const cx = cv.getContext('2d', {willReadFrequently: true});
+  cx.imageSmoothingQuality = 'high'; cx.drawImage(img, 0, 0, sw, sh);
+  const px = cx.getImageData(0, 0, sw, sh).data, n = sw * sh;
+  const lum = new Float32Array(n), hist = new Uint32Array(256);
+  for (let i = 0; i < n; i++) { const v = 0.299 * px[i*4] + 0.587 * px[i*4+1] + 0.114 * px[i*4+2]; lum[i] = v; hist[v | 0]++; }
+  // 大津の方法で、明るい紙と暗い背景の境目を決める
+  let sum = 0; for (let v = 0; v < 256; v++) sum += v * hist[v];
+  let wB = 0, sB = 0, best = -1, t = 128;
+  for (let v = 0; v < 256; v++) {
+    wB += hist[v]; if (!wB) continue; const wF = n - wB; if (!wF) break;
+    sB += v * hist[v];
+    const mB = sB / wB, mF = (sum - sB) / wF, bv = wB * wF * (mB - mF) * (mB - mF);
+    if (bv > best) { best = bv; t = v; }
+  }
+  let mB = 0, nB = 0, mF = 0, nF = 0;
+  for (let i = 0; i < n; i++) { if (lum[i] > t) { mF += lum[i]; nF++; } else { mB += lum[i]; nB++; } }
+  if (!nF || !nB) return null;
+  mF /= nF; mB /= nB;
+  if (mF < 110 || mF - mB < 45) return null;                 // 紙と背景の差がはっきりしない
+  // 明るい領域のうち一番大きいものを紙とみなす（細い連結を切るため1回縮める）
+  const m0 = new Uint8Array(n);
+  for (let i = 0; i < n; i++) m0[i] = lum[i] > t ? 1 : 0;
+  const m1 = new Uint8Array(n);
+  for (let y = 1; y < sh - 1; y++) for (let x = 1; x < sw - 1; x++) {
+    const i = y * sw + x;
+    if (m0[i] && m0[i-1] && m0[i+1] && m0[i-sw] && m0[i+sw]) m1[i] = 1;
+  }
+  const lab = new Int32Array(n); let bestLab = 0, bestSize = 0, L = 0;
+  const stack = new Int32Array(n);
+  for (let i0 = 0; i0 < n; i0++) {
+    if (!m1[i0] || lab[i0]) continue;
+    L++; let sp = 0, size = 0; stack[sp++] = i0; lab[i0] = L;
+    while (sp) {
+      const i = stack[--sp]; size++;
+      const x = i % sw, y = (i / sw) | 0;
+      if (x > 0 && m1[i-1] && !lab[i-1]) { lab[i-1] = L; stack[sp++] = i-1; }
+      if (x < sw-1 && m1[i+1] && !lab[i+1]) { lab[i+1] = L; stack[sp++] = i+1; }
+      if (y > 0 && m1[i-sw] && !lab[i-sw]) { lab[i-sw] = L; stack[sp++] = i-sw; }
+      if (y < sh-1 && m1[i+sw] && !lab[i+sw]) { lab[i+sw] = L; stack[sp++] = i+sw; }
+    }
+    if (size > bestSize) { bestSize = size; bestLab = L; }
+  }
+  if (!bestLab || bestSize < n * 0.04) return null;
+  // 紙は凸な形なので、領域の外周点から凸包を作り、中を塗る（右端の太い文字などで欠けても紙として扱える）
+  const pts = [];
+  for (let y = 0; y < sh; y++) {
+    let a = -1, b = -1;
+    for (let x = 0; x < sw; x++) if (lab[y * sw + x] === bestLab) { if (a < 0) a = x; b = x; }
+    if (a >= 0) { pts.push([a, y], [b, y]); }
+  }
+  for (let x = 0; x < sw; x++) {
+    let a = -1, b = -1;
+    for (let y = 0; y < sh; y++) if (lab[y * sw + x] === bestLab) { if (a < 0) a = y; b = y; }
+    if (a >= 0) { pts.push([x, a], [x, b]); }
+  }
+  pts.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const lo = [], up = [];
+  for (const q of pts) { while (lo.length >= 2 && cross(lo[lo.length-2], lo[lo.length-1], q) <= 0) lo.pop(); lo.push(q); }
+  for (let i = pts.length - 1; i >= 0; i--) { const q = pts[i]; while (up.length >= 2 && cross(up[up.length-2], up[up.length-1], q) <= 0) up.pop(); up.push(q); }
+  const hull = lo.slice(0, -1).concat(up.slice(0, -1));
+  const mask = document.createElement('canvas'); mask.width = sw; mask.height = sh;
+  const mctx = mask.getContext('2d');
+  mctx.fillStyle = mctx.strokeStyle = '#fff'; mctx.lineWidth = 4; mctx.lineJoin = 'round';
+  mctx.beginPath(); hull.forEach((q, i) => i ? mctx.lineTo(q[0] + .5, q[1] + .5) : mctx.moveTo(q[0] + .5, q[1] + .5)); mctx.closePath();
+  mctx.fill(); mctx.stroke();
+  const mdat = mctx.getImageData(0, 0, sw, sh).data;
+  const fill = new Uint8Array(n);
+  for (let i = 0; i < n; i++) fill[i] = mdat[i*4+3] > 128 ? 1 : 0;
+  let area = 0; for (let i = 0; i < n; i++) area += fill[i];
+  if (area > n * 0.88) return null;                           // ほぼ全面が紙 → 切り出し不要
+  // 向き：形の主軸（縦長のレシートを縦にそろえる）
+  let mx = 0, my = 0;
+  for (let i = 0; i < n; i++) if (fill[i]) { mx += i % sw; my += (i / sw) | 0; }
+  mx /= area; my /= area;
+  let u20 = 0, u02 = 0, u11 = 0;
+  for (let i = 0; i < n; i++) if (fill[i]) { const dx = (i % sw) - mx, dy = ((i / sw) | 0) - my; u20 += dx * dx; u02 += dy * dy; u11 += dx * dy; }
+  u20 /= area; u02 /= area; u11 /= area;
+  const th = 0.5 * Math.atan2(2 * u11, u20 - u02);           // 主軸の向き（x軸から）
+  const tr = u20 + u02, dt = Math.sqrt(Math.max(0, (u20 - u02) * (u20 - u02) + 4 * u11 * u11));
+  const l1 = (tr + dt) / 2, l2 = Math.max(1e-6, (tr - dt) / 2);
+  const elong = Math.sqrt(l1 / l2);
+  let d = th > 0 ? th - Math.PI / 2 : th + Math.PI / 2;      // 縦からのずれ
+  let alpha = 0;
+  if (elong >= 1.5 && (Math.abs(d) < 0.6 || elong >= 2.5)) alpha = -d;
+  // 文字の行の傾きで微調整（±7度を探す）
+  const dark = [];
+  for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) { const i = y * sw + x; if (fill[i] && lum[i] < mF * 0.62) dark.push(x - mx, y - my); }
+  let ca = Math.cos(alpha), sa = Math.sin(alpha), rho = 0;
+  if (dark.length > 400) {
+    let bestScore = -1;
+    for (let deg = -7; deg <= 7.01; deg += 0.5) {
+      const r = deg * Math.PI / 180, c2 = Math.cos(alpha + r), s2 = Math.sin(alpha + r);
+      const bins = new Float32Array(sh * 3 + 40);
+      for (let j = 0; j < dark.length; j += 2) {
+        const yy = Math.round(dark[j] * s2 + dark[j+1] * c2 + sh * 1.5);
+        if (yy >= 0 && yy < bins.length) bins[yy]++;
+      }
+      let sc = 0; for (let j = 0; j < bins.length; j++) sc += bins[j] * bins[j];
+      if (sc > bestScore) { bestScore = sc; rho = r; }
+    }
+  }
+  alpha += rho; ca = Math.cos(alpha); sa = Math.sin(alpha);
+  // 回転後の範囲
+  let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+  for (let i = 0; i < n; i++) if (fill[i]) {
+    const dx = (i % sw) - mx, dy = ((i / sw) | 0) - my;
+    const qx = ca * dx - sa * dy, qy = sa * dx + ca * dy;
+    if (qx < x0) x0 = qx; if (qx > x1) x1 = qx; if (qy < y0) y0 = qy; if (qy > y1) y1 = qy;
+  }
+  return {k, alpha, mx, my, x0, x1, y0, y1, mask, area: area / n, elong};
+}
+
+/* 下処理：レシートの切り出し・傾き補正・拡大・コントラスト補正。文字認識の精度を上げるため
+   mode: 'none'（何もしない）／'gray'（白黒にしてコントラストを伸ばす）／'bin'（影に強い白黒2値） */
+async function preprocessImage(file, mode, opt) {
+  mode = mode || 'gray'; opt = opt || {};
   const img = await loadImage(file);
   const w0 = img.naturalWidth, h0 = img.naturalHeight;
   if (!w0 || !h0) throw new Error('画像を開けません');
-  let scale = 1;
-  const maxSide = Math.max(w0, h0), minSide = Math.min(w0, h0);
-  if (maxSide > 3000) scale = 3000 / maxSide;
-  if (w0 * h0 * scale * scale > 6e6) scale = Math.sqrt(6e6 / (w0 * h0));
-  if (minSide * scale < 700) scale = Math.min(2, 700 / minSide);
-  const w = Math.max(1, Math.round(w0 * scale)), h = Math.max(1, Math.round(h0 * scale));
-  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
-  const ctx = cv.getContext('2d', {willReadFrequently: true});
-  ctx.imageSmoothingQuality = 'high';
-  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
-  ctx.drawImage(img, 0, 0, w, h);
-  // 背景（照明のムラ）を縮小→拡大でぼかして推定
-  const sw = Math.max(2, Math.round(w / 32)), sh = Math.max(2, Math.round(h / 32));
-  const small = document.createElement('canvas'); small.width = sw; small.height = sh;
-  const sctx = small.getContext('2d'); sctx.imageSmoothingQuality = 'high'; sctx.drawImage(cv, 0, 0, sw, sh);
-  const bgc = document.createElement('canvas'); bgc.width = w; bgc.height = h;
-  const bctx = bgc.getContext('2d', {willReadFrequently: true}); bctx.imageSmoothingEnabled = true; bctx.imageSmoothingQuality = 'high';
-  bctx.drawImage(small, 0, 0, w, h);
+  let seg = null;
+  if (opt.crop !== false) { try { seg = segmentReceipt(img); } catch (e) { seg = null; } }
+  const cv = document.createElement('canvas');
+  let ctx;
+  if (seg) {
+    const {k, alpha, mx, my, x0, x1, y0, y1} = seg;
+    const mg = 0.03 * Math.max(x1 - x0, y1 - y0) / 1;
+    const rw = (x1 - x0 + 2 * Math.min(mg, 6)) / k, rh = (y1 - y0 + 2 * Math.min(mg, 6)) / k;   // 元画像上のサイズ
+    let s = (opt.width || 1100) / rw;
+    s = Math.min(3, Math.max(0.5, s));
+    if (rw * rh * s * s > 7e6) s = Math.sqrt(7e6 / (rw * rh));
+    const w = Math.max(8, Math.round(rw * s)), h = Math.max(8, Math.round(rh * s));
+    cv.width = w; cv.height = h;
+    ctx = cv.getContext('2d', {willReadFrequently: true});
+    ctx.imageSmoothingQuality = 'high';
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+    const ca = Math.cos(alpha), sa = Math.sin(alpha);
+    const qcx = (x0 + x1) / 2, qcy = (y0 + y1) / 2;          // 回転後の中心（縮小画像・重心基準）
+    // 元画像(px) → 出力: o = s*R*(p - c0/k) ... c0 は縮小画像上の重心
+    const c0x = mx / k, c0y = my / k;
+    const e = w / 2 - s * (ca * c0x - sa * c0y) - s * qcx / k * 1 + 0;
+    const f = h / 2 - s * (sa * c0x + ca * c0y) - s * qcy / k * 1 + 0;
+    const T = [s * ca, s * sa, -s * sa, s * ca, e, f];
+    ctx.setTransform(T[0], T[1], T[2], T[3], T[4], T[5]);
+    ctx.drawImage(img, 0, 0);
+    // 紙の外側を白くつぶす
+    const mc = document.createElement('canvas'); mc.width = w; mc.height = h;
+    const mx2 = mc.getContext('2d', {willReadFrequently: true});
+    mx2.setTransform(T[0] / k, T[1] / k, T[2] / k, T[3] / k, T[4], T[5]);
+    mx2.imageSmoothingEnabled = true;
+    mx2.drawImage(seg.mask, 0, 0);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    const im = ctx.getImageData(0, 0, w, h), md = mx2.getImageData(0, 0, w, h);
+    for (let i = 0; i < im.data.length; i += 4) if (md.data[i+3] < 128) { im.data[i] = im.data[i+1] = im.data[i+2] = 255; }
+    ctx.putImageData(im, 0, 0);
+  } else {
+    let scale = 1;
+    const maxSide = Math.max(w0, h0), minSide = Math.min(w0, h0);
+    if (maxSide > 3000) scale = 3000 / maxSide;
+    if (w0 * h0 * scale * scale > 6e6) scale = Math.sqrt(6e6 / (w0 * h0));
+    if (minSide * scale < 700) scale = Math.min(2, 700 / minSide);
+    const w = Math.max(1, Math.round(w0 * scale)), h = Math.max(1, Math.round(h0 * scale));
+    cv.width = w; cv.height = h;
+    ctx = cv.getContext('2d', {willReadFrequently: true});
+    ctx.imageSmoothingQuality = 'high';
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0, w, h);
+  }
+  const w = cv.width, h = cv.height;
   if (mode !== 'none') {
-    const src = ctx.getImageData(0, 0, w, h), bg = bctx.getImageData(0, 0, w, h);
-    const a = src.data, b = bg.data;
-    if (mode === 'gray') {
-      const hist = new Uint32Array(256);
-      for (let i = 0; i < a.length; i += 4) hist[Math.round(0.299 * a[i] + 0.587 * a[i+1] + 0.114 * a[i+2])]++;
-      const tot = w * h; let acc = 0, lo = 0, hi = 255;
-      for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= tot * 0.01) { lo = v; break; } }
-      acc = 0;
-      for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= tot * 0.3) { hi = v; break; } }
-      const span = Math.max(30, hi - lo);
-      for (let i = 0; i < a.length; i += 4) {
-        let v = ((0.299 * a[i] + 0.587 * a[i+1] + 0.114 * a[i+2]) - lo) / span * 255;
-        v = v > 255 ? 255 : v < 0 ? 0 : v;
-        a[i] = a[i+1] = a[i+2] = v; a[i+3] = 255;
+    const src = ctx.getImageData(0, 0, w, h), a = src.data, n = w * h;
+    const g = new Float32Array(n);
+    for (let i = 0; i < n; i++) g[i] = 0.299 * a[i*4] + 0.587 * a[i*4+1] + 0.114 * a[i*4+2];
+    if (mode === 'bin') {
+      // 影に強い2値化：まわりの平均より十分暗い所だけを文字にする
+      const ii = new Float64Array((w + 1) * (h + 1));
+      for (let y = 0; y < h; y++) { let row = 0; for (let x = 0; x < w; x++) { row += g[y * w + x]; ii[(y+1) * (w+1) + x + 1] = ii[y * (w+1) + x + 1] + row; } }
+      const r = Math.max(8, Math.round(w / 40));
+      for (let y = 0; y < h; y++) {
+        const ya = Math.max(0, y - r), yb = Math.min(h, y + r + 1);
+        for (let x = 0; x < w; x++) {
+          const xa = Math.max(0, x - r), xb = Math.min(w, x + r + 1);
+          const mean = (ii[yb * (w+1) + xb] - ii[ya * (w+1) + xb] - ii[yb * (w+1) + xa] + ii[ya * (w+1) + xa]) / ((xb - xa) * (yb - ya));
+          const v = g[y * w + x] < mean * 0.86 ? 0 : 255;
+          const o = (y * w + x) * 4; a[o] = a[o+1] = a[o+2] = v; a[o+3] = 255;
+        }
       }
     } else {
-      for (let i = 0; i < a.length; i += 4) {
-        const l = 0.299 * a[i] + 0.587 * a[i+1] + 0.114 * a[i+2];
-        const bl = Math.max(40, 0.299 * b[i] + 0.587 * b[i+1] + 0.114 * b[i+2]);
-        let v = l / bl * 238;
-        v = v > 255 ? 255 : v < 0 ? 0 : v;
-        a[i] = a[i+1] = a[i+2] = v; a[i+3] = 255;
+      const hist = new Uint32Array(256);
+      for (let i = 0; i < n; i++) hist[Math.round(g[i])]++;
+      let acc = 0, lo = 0, hi = 255;
+      for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= n * 0.01) { lo = v; break; } }
+      acc = 0;
+      for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= n * 0.3) { hi = v; break; } }
+      const span = Math.max(30, hi - lo);
+      for (let i = 0; i < n; i++) {
+        let v = (g[i] - lo) / span * 255; v = v > 255 ? 255 : v < 0 ? 0 : v;
+        a[i*4] = a[i*4+1] = a[i*4+2] = v; a[i*4+3] = 255;
       }
     }
     ctx.putImageData(src, 0, 0);
   }
+  if (opt.canvas) return cv;
   const blob = await new Promise(res => cv.toBlob(res, 'image/png'));
   if (!blob) throw new Error('画像を処理できません');
   return await blob.arrayBuffer();
 }
-function runOcr(png, state, setMsg) {
-  return (async () => {
-    const corePath = new URL(`vendor/core/tesseract-core-${simdSupported() ? 'simd-' : ''}lstm.wasm.js`, location.href).href;
-    setMsg('日本語データを読み込んでいます（初回のみ約14MB）…', null);
-    const res = await fetch('vendor/lang/jpn.traineddata');
-    if (!res.ok) throw new Error('日本語データを読み込めません');
-    const lang = await res.arrayBuffer();
-    if (state.cancelled) return null;
-    setMsg('文字認識エンジンを起動しています…', null);
-    const w = new Worker('ocr-worker.js');
-    state.worker = w;
-    await new Promise((ok, ng) => {
-      w.onmessage = e => { if (e.data.type === 'ready') ok(); else if (e.data.type === 'error') ng(new Error(e.data.message)); };
-      w.onerror = () => ng(new Error('文字認識を開始できません'));
-      w.postMessage({type:'init', corePath, lang, psm:6}, [lang]);
-    });
-    if (state.cancelled) return null;
-    setMsg('文字を読み取っています…', 0);
-    const text = await new Promise((ok, ng) => {
-      w.onmessage = e => {
-        const m = e.data;
-        if (m.type === 'progress') setMsg('文字を読み取っています…', m.value);
-        else if (m.type === 'result') ok(m.text);
-        else if (m.type === 'error') ng(new Error(m.message));
-      };
-      w.onerror = () => ng(new Error('文字の読み取りに失敗しました'));
-      w.postMessage({type:'recognize', image:png}, [png]);
-    });
-    try { w.terminate(); } catch (e) {}
-    state.worker = null;
-    return text;
-  })();
+async function startOcrWorker(state, setMsg, psm) {
+  const corePath = new URL(`vendor/core/tesseract-core-${simdSupported() ? 'simd-' : ''}lstm.wasm.js`, location.href).href;
+  setMsg('日本語データを読み込んでいます（初回のみ約14MB）…', null);
+  const res = await fetch('vendor/lang/jpn.traineddata');
+  if (!res.ok) throw new Error('日本語データを読み込めません');
+  const lang = await res.arrayBuffer();
+  if (state.cancelled) return null;
+  setMsg('文字認識エンジンを起動しています…', null);
+  const w = new Worker('ocr-worker.js');
+  state.worker = w;
+  await new Promise((ok, ng) => {
+    w.onmessage = e => { if (e.data.type === 'ready') ok(); else if (e.data.type === 'error') ng(new Error(e.data.message)); };
+    w.onerror = () => ng(new Error('文字認識を開始できません'));
+    w.postMessage({type:'init', corePath, lang, psm:psm || 6}, [lang]);
+  });
+  return state.cancelled ? null : w;
+}
+function ocrCall(w, buf, psm, onProgress, extra) {
+  return new Promise((ok, ng) => {
+    w.onmessage = e => {
+      const m = e.data;
+      if (m.type === 'progress') { if (onProgress) onProgress(m.value); }
+      else if (m.type === 'result') ok(m.text);
+      else if (m.type === 'error') ng(new Error(m.message));
+    };
+    w.onerror = () => ng(new Error('文字の読み取りに失敗しました'));
+    w.postMessage(Object.assign({type:'recognize', image:buf, psm}, extra || {}), [buf]);
+  });
+}
+async function runOcr(png, state, setMsg, psm) {
+  const w = await startOcrWorker(state, setMsg, psm);
+  if (!w) return null;
+  setMsg('文字を読み取っています…', 0);
+  const text = await ocrCall(w, png, psm || 6, v => setMsg('文字を読み取っています…', v));
+  try { w.terminate(); } catch (e) {}
+  state.worker = null;
+  return text;
 }
 
 async function handleReceiptFile(file) {
@@ -1516,6 +1706,7 @@ function openReceiptReview(info, rawText, thumb) {
     else if (t.dataset.f === 'inc') { it.inc = t.checked; repaintItem(i); fixSugBanner(); refresh(); }
   };
 }
+
 /* ===== Googleスプレッドシートとの同期（任意機能） =====
    端末の記録が本体。シートは「自動の控え」で、シート側で直した内容も取り込める。
    同じ記録を両方で変えたときは、更新日時が新しい方を採用する。 */
