@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.3.1';
+const APP_VERSION = '1.3.2';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -424,10 +424,10 @@ function parseReceipt(text, now) {
   now = now || new Date();
   const lines = [];
   const rawLines = String(text).split(/\r?\n/).map(normLine).filter(Boolean);
-  const isPriceOnly = l => { const m = l.match(/^¥?\s?-?\s?¥?(\d{1,7})$/); return !!m && (l.includes('¥') || m[1].length >= 2); };
+  const isPriceOnly = l => { const m = l.match(/^¥?\s?-?\s?¥?(\d{1,7})$/); return !!m && (l.includes('¥') || (m[1].length >= 3 && m[1][0] !== '0')); };   // 「00978」のような番号は金額ではない
   const kind = rawLines.map(l => isPriceOnly(l) ? 'P' : (hasLetter(l) && !lastAmount(l) && l.length <= 40 ? 'L' : 'O'));
   for (let i = 0; i < rawLines.length; i++) {                      // 「品名」の次の行が金額だけのとき（文字認識が列を分けて出す場合）は1行にする
-    let merge = kind[i] === 'L' && kind[i + 1] === 'P';
+    let merge = kind[i] === 'L' && kind[i + 1] === 'P' && !HEADER_RE.test(rawLines[i]) && !/^(取扱|伝票|番号|売上$|ご利用|端末|カード)/.test(rawLines[i]);
     if (merge) {                                                  // 品名が何行も続き、そのあと金額が何行も続くとき（列ごとに出力）は、ここでは結合しない
       let lr = 0, pr = 0;
       for (let j = i; j >= 0 && kind[j] === 'L'; j--) lr++;
@@ -480,10 +480,10 @@ function parseReceipt(text, now) {
       const l = lines[i];
       if (used.has(i) || HEADER_RE.test(l)) continue;
       const pm = l.match(/^¥?\s?(-?)\s?¥?(\d{1,7})$/);
-      if (pm && (l.includes('¥') || pm[2].length >= 2)) prices.push({amount:Number(pm[2]), neg:pm[1] === '-'});
+      if (pm && isPriceOnly(l)) prices.push({amount:Number(pm[2]), neg:pm[1] === '-'});
       else if (hasLetter(l) && !lastAmount(l) && l.length <= 30 && (l.match(/[A-Za-z぀-ヿ㐀-鿿]/g) || []).length >= 2) names.push(l);
     }
-    if (prices.length >= 2 && Math.abs(names.length - prices.length) <= 1) {
+    if (prices.length >= 2 && names.length >= 2 && Math.abs(names.length - prices.length) <= 1) {
       const n = Math.min(names.length, prices.length), items = [];
       for (let i = 0; i < n; i++) items.push({label:names[i], amount:prices[i].amount, neg:prices[i].neg || DISC_RE.test(names[i])});
       if (items.length > info.items.length) info.items = items;
