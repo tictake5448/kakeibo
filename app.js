@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -398,6 +398,19 @@ function isStoreLine(l) {
   const letters = (l.match(/[A-Za-z぀-ヿ㐀-鿿]/g) || []).length;
   return letters >= 2 && l.length <= 30;
 }
+const PAY_BRANDS = [['JCB',/JCB/i],['VISA',/VISA/i],['Mastercard',/master\s*card/i],['AMEX',/(AMEX|American\s*Express)/i],['Diners',/Diners/i],['QUICPay',/QUIC\s*Pay/i],['iD',/(^|[^A-Za-z])iD([^A-Za-z]|$)/],['Suica',/Suica|スイカ/i],['PASMO',/PASMO/i],['nanaco',/nanaco/i],['WAON',/WAON/i],['楽天Edy',/(楽天\s*Edy|Edy)/i],['楽天ペイ',/楽天\s*ペイ/],['PayPay',/PayPay/i],['d払い',/d払い/],['au PAY',/au\s*PAY/i],['メルペイ',/メルペイ/],['交通系IC',/交通系/]];
+function detectBrand(text) {
+  const t = String(text).normalize('NFKC');
+  for (const [name, re] of PAY_BRANDS) if (re.test(t)) return name;
+  return '';
+}
+/* レシートのカード名・電子マネー名と同じ名前の支払方法が登録済みなら、そのIDを返す */
+function payByBrand(brand) {
+  if (!brand) return null;
+  const b = brand.toLowerCase();
+  const p = S.pays.find(p => String(p.name).normalize('NFKC').toLowerCase().includes(b));
+  return p ? p.id : null;
+}
 function detectPay(text) {
   const t = text.normalize('NFKC');
   let id = null;
@@ -410,11 +423,12 @@ function detectPay(text) {
 function parseReceipt(text, now) {
   now = now || new Date();
   const lines = String(text).split(/\r?\n/).map(normLine).filter(Boolean);
-  const info = {date:null, store:'', items:[], total:null, pay:detectPay(text), lines};
+  const info = {date:null, store:'', items:[], total:null, pay:detectPay(text), brand:detectBrand(text), lines};
   const used = new Set();
   for (let i = 0; i < lines.length; i++) { const d = findDate(lines[i], now); if (d) { info.date = d; used.add(i); break; } }
   const cjkN = l => (l.match(/[぀-ヿ㐀-鿿]/g) || []).length;
-  let si = -1;
+  let si = lines.findIndex(l => /^店名\s*[:：]\s*\S/.test(l));
+  if (si >= 0) lines[si] = lines[si].replace(/^店名\s*[:：]\s*/, '');
   for (let i = 1; i < Math.min(lines.length, 16) && si < 0; i++) {                // 電話番号の行の直前が店名のことが多い
     if (/(TEL|Tel|電話|\d{2,4}-\d{2,4}-\d{3,4})/.test(lines[i])) {
       for (let j = i - 1; j >= Math.max(0, i - 2); j--) if (isStoreLine(lines[j]) && cjkN(lines[j]) >= 3) { si = j; break; }
@@ -443,6 +457,23 @@ function parseReceipt(text, now) {
     if (HEADER_RE.test(l)) continue;
     const it = matchItem(l);
     if (it) { info.items.push(it); started = true; }
+  }
+  if (info.items.length < 2) {                                  // 品名の行と金額の行が別々に読まれた場合は、上から順に組み合わせる
+    let to = lines.findIndex((l, i) => i >= from && (END_RE.test(l) || TOTAL_RE.test(l)));
+    if (to < 0) to = lines.length;
+    const names = [], prices = [];
+    for (let i = from; i < to; i++) {
+      const l = lines[i];
+      if (used.has(i) || HEADER_RE.test(l)) continue;
+      const pm = l.match(/^¥?\s?(-?)\s?¥?(\d{1,7})$/);
+      if (pm && (l.includes('¥') || pm[2].length >= 2)) prices.push({amount:Number(pm[2]), neg:pm[1] === '-'});
+      else if (hasLetter(l) && !lastAmount(l) && l.length <= 30 && (l.match(/[A-Za-z぀-ヿ㐀-鿿]/g) || []).length >= 2) names.push(l);
+    }
+    if (prices.length >= 2 && Math.abs(names.length - prices.length) <= 1) {
+      const n = Math.min(names.length, prices.length), items = [];
+      for (let i = 0; i < n; i++) items.push({label:names[i], amount:prices[i].amount, neg:prices[i].neg || DISC_RE.test(names[i])});
+      if (items.length > info.items.length) info.items = items;
+    }
   }
   if (info.total === null) {                                    // 合計が読めないとき：支払いの行の金額 → なければ品目の合計
     for (const l of lines) {
@@ -1513,8 +1544,10 @@ async function handleReceiptFile(file) {
 /* ===== 反映前の確認画面（分類は自分で決める） ===== */
 function openReceiptReview(info, rawText, thumb) {
   const expCats = S.cats.filter(c => c.type === 'e');
+  const brandPay = payByBrand(info.brand);
   const R = {
-    id: uid(), date: info.date || todayStr(), store: info.store || '', pay: (info.pay && S.pays.some(p => p.id === info.pay)) ? info.pay : (S.pays.some(p => p.id === ui.lastPay) ? ui.lastPay : (S.pays[0] ? S.pays[0].id : '')),
+    id: uid(), date: info.date || todayStr(), store: info.store || '', brand: info.brand || '', seq: info.seq || '',
+    pay: brandPay || ((info.pay && S.pays.some(p => p.id === info.pay)) ? info.pay : (S.pays.some(p => p.id === ui.lastPay) ? ui.lastPay : (S.pays[0] ? S.pays[0].id : ''))),
     mode: info.items.length ? 'items' : 'single', learn: true, total: info.total, readN: info.items.length,
     items: info.items.map(it => { const s = suggestCat(it.label, info.store); return {label:it.label, amt:it.amount, neg:it.neg, cat:s ? s.c : '', sug:!!s, inc:true}; }),
     singleCat: '', singleSug: false, singleAmt: 0
@@ -1544,16 +1577,17 @@ function openReceiptReview(info, rawText, thumb) {
       <div class="item-note">${it.inc && it.sug && it.cat ? '<span class="tag">候補</span>自動で付けた分類です' : ''}</div>
     </div>`;
 
-  const sheet = openSheet('', 'レシートの確認', () => URL.revokeObjectURL(thumb));
+  const brandHint = () => !R.brand ? '' : `<p class="note" style="margin:8px 0 0">レシートの表記：<b>${esc(R.brand)}</b>${payByBrand(R.brand) === R.pay ? '' : ` <button type="button" class="chip small" data-act="r-addpay" style="margin-left:4px">「${esc(R.brand)}」を支払方法に追加して選ぶ</button>`}</p>`;
+  const sheet = openSheet('', 'レシートの確認', () => { if (thumb) URL.revokeObjectURL(thumb); });
   sheetLocked = true;
   function paintAll() {
     sheet.innerHTML = `
-      <div class="sheet-head"><h2>レシートの内容を確認</h2>${closeBtn('vClose')}</div>
+      <div class="sheet-head"><h2>レシートの内容を確認${R.seq ? `（${esc(R.seq)}）` : ''}</h2>${closeBtn('vClose')}</div>
       ${R.readN ? '' : `<div class="banner warn"><div><b>明細を読み取れませんでした。</b>「行を追加」で明細を入力するか、「合計1件で登録」を使ってください。</div></div>`}
-      <div><button type="button" class="chip small" data-act="r-img" aria-expanded="false">レシート画像を見る</button><img class="thumb" id="rImg" src="${thumb}" alt="レシート" hidden style="margin-top:10px"></div>
+      ${thumb ? `<div><button type="button" class="chip small" data-act="r-img" aria-expanded="false">レシート画像を見る</button><img class="thumb" id="rImg" src="${thumb}" alt="レシート" hidden style="margin-top:10px"></div>` : ''}
       <label class="field"><span class="flabel">日付</span><input id="rDate" type="date" value="${esc(R.date)}"></label>
       <label class="field"><span class="flabel">店名</span><input id="rStore" type="text" maxlength="24" value="${esc(R.store)}" placeholder="例：スーパーみらい" autocomplete="off"></label>
-      <div class="field"><span class="flabel">支払方法</span><div class="chips" id="rPays">${payChips(R.pay)}</div></div>
+      <div class="field"><span class="flabel">支払方法</span><div class="chips" id="rPays">${payChips(R.pay)}</div><div id="rBrand">${brandHint()}</div></div>
       <div class="field"><div class="seg" id="rMode" role="group" aria-label="登録のしかた">
         <button type="button" data-m="items" aria-pressed="${R.mode === 'items'}">明細ごとに登録</button>
         <button type="button" data-m="single" aria-pressed="${R.mode === 'single'}">合計1件で登録</button></div></div>
@@ -1644,7 +1678,7 @@ function openReceiptReview(info, rawText, thumb) {
 
   sheet.onclick = e => {
     const t = e.target;
-    if (t.closest('#vClose, #rNo')) { closeSheet(); return; }
+    if (t.closest('#vClose, #rNo')) { receiptQueue.length = 0; closeSheet(); return; }
     if (t.closest('#rGo')) {
       const err = validate(); if (err) { $('#rErr').textContent = err; return; }
       const txs = build();
@@ -1654,16 +1688,22 @@ function openReceiptReview(info, rawText, thumb) {
       ui.month = R.date.slice(0,7); ui.tab = 'home'; ui.filter = 'all'; ui.q = ''; $('#q').value = '';
       closeSheet(); render();
       toast(`${txs.length}件を登録しました`, {action:'取り消す', fn:() => undoBatch(batch), ms:9000});
+      if (receiptQueue.length) setTimeout(() => openReceiptReview(receiptQueue.shift(), '', ''), 350);
       return;
     }
     const pb = t.closest('#rPays button[data-p]');
-    if (pb) { R.pay = pb.dataset.p; $('#rPays').innerHTML = payChips(R.pay); return; }
+    if (pb) { R.pay = pb.dataset.p; $('#rPays').innerHTML = payChips(R.pay); $('#rBrand').innerHTML = brandHint(); return; }
     const mb = t.closest('#rMode button[data-m]');
     if (mb) { R.mode = mb.dataset.m; sheet.querySelectorAll('#rMode button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.m === R.mode))); paintBody(); return; }
     const act = t.closest('[data-act]');
     if (!act) return;
     const row = t.closest('.item'), i = row ? Number(row.dataset.i) : -1;
     switch (act.dataset.act) {
+      case 'r-addpay': {
+        const ex = payByBrand(R.brand);
+        if (ex) R.pay = ex; else { const np = {id:'p' + uid(), name:R.brand, color:PAL[(S.pays.length + 3) % PAL.length]}; S.pays.push(np); saveMeta(); scheduleSync(); R.pay = np.id; }
+        $('#rPays').innerHTML = payChips(R.pay); $('#rBrand').innerHTML = brandHint(); break;
+      }
       case 'r-img': { const im = $('#rImg'); im.hidden = !im.hidden; act.setAttribute('aria-expanded', String(!im.hidden)); act.textContent = im.hidden ? 'レシート画像を見る' : 'レシート画像を隠す'; break; }
       case 'r-del': R.items.splice(i, 1); paintBody(); break;
       case 'r-sign': R.items[i].neg = !R.items[i].neg; repaintItem(i); refresh(); break;
@@ -1707,6 +1747,66 @@ function openReceiptReview(info, rawText, thumb) {
   };
 }
 
+
+
+/* ===== 「レシート」ボタンの入口：読み取り方を選ぶ ===== */
+let receiptQueue = [];
+const CLAUDE_PROMPT = `添付したレシート画像を、次の形式の文字だけで書き出してください（説明や装飾は不要です）。
+店名：（店舗名。支店名があれば含める）
+日付：YYYY-MM-DD
+品名 ¥金額　（1品1行。数量が2以上なら「品名 ×2 ¥合計金額」。値引き・クーポンは「値引 ¥-金額」）
+合計 ¥金額
+支払方法：（クレジットカード／電子マネー／現金のいずれか）（カード名・ブランド名があれば続けて書く）
+読めない文字は推測せず「?」にしてください。
+レシートが複数枚あるときは、1枚ごとに「=====」だけの行で区切ってください。`;
+function openReceiptChoice() {
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>レシートを取り込む</h2>${closeBtn('cClose')}</div>
+    <div class="stack">
+      <button type="button" class="btn primary" id="cPhoto">写真から読み取る（端末内）</button>
+      <button type="button" class="btn" id="cPaste">文字を貼り付けて取り込む</button>
+      <button type="button" class="btn" id="cManual">手入力で明細を作る</button>
+    </div>
+    <p class="note" style="margin-left:0">「文字を貼り付け」は、iPhoneの文字認識（Live Text）や、Claudeに読ませた結果をそのまま取り込めます。品名を正確に残したいときに向いています。</p>`, 'レシートを取り込む');
+  sheet.querySelector('#cClose').onclick = closeSheet;
+  sheet.querySelector('#cPhoto').onclick = () => { closeSheet(); $('#fileReceipt').click(); };
+  sheet.querySelector('#cPaste').onclick = openReceiptPaste;
+  sheet.querySelector('#cManual').onclick = () => openReceiptReview({date:null, store:'', items:[], total:null, pay:null}, '', '');
+}
+function openReceiptPaste() {
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>文字を貼り付けて取り込む</h2>${closeBtn('pClose')}</div>
+    <textarea id="pText" rows="9" placeholder="ここにレシートの文字を貼り付け" style="width:100%"></textarea>
+    <p class="err" id="pErr" style="min-height:20px"></p>
+    <details class="raw"><summary>貼り付ける文字の作り方</summary>
+      <p class="note" style="margin-left:0"><b>A. iPhoneの文字認識（無料・端末内）</b><br>
+      ① 写真アプリでレシートを開く → 右下の文字認識のマークを押す<br>
+      ② 文字を長押し →「すべてを選択」→「コピー」<br>
+      ③ ここに貼り付ける<br>
+      （この欄を長押し →「テキストを読み取り」を選ぶと、カメラの文字を直接入力できます。iOS 15以降のことが多い。確信度：中）</p>
+      <p class="note" style="margin-left:0"><b>B. Claudeに読ませる（正確・複数枚OK）</b><br>
+      ① 下のボタンで依頼文をコピー<br>
+      ② Claudeアプリにレシートの写真を添付し、依頼文を貼り付けて送る<br>
+      ③ 返ってきた文字をコピーして、ここに貼り付ける</p>
+      <button type="button" class="chip" id="pCopy">Claude用の依頼文をコピー</button>
+    </details>
+    <div class="sheet-foot"><div class="actions"><button type="button" class="btn" id="pNo">やめる</button><button type="button" class="btn primary" id="pGo">内容を確認する</button></div></div>`, '文字を貼り付けて取り込む');
+  sheet.querySelector('#pClose').onclick = sheet.querySelector('#pNo').onclick = closeSheet;
+  sheet.querySelector('#pCopy').onclick = async e => {
+    const b = e.currentTarget;
+    try { await navigator.clipboard.writeText(CLAUDE_PROMPT); b.textContent = 'コピーしました'; }
+    catch (err) { const ta = $('#pText'); ta.value = CLAUDE_PROMPT; ta.select(); b.textContent = '上の欄に出しました。コピーしてください'; }
+  };
+  sheet.querySelector('#pGo').onclick = () => {
+    const text = $('#pText').value.trim();
+    if (!text) { $('#pErr').textContent = '文字を貼り付けてください。'; return; }
+    const parts = text.split(/^\s*={3,}\s*$/m).map(x => x.trim()).filter(Boolean);
+    const infos = parts.map(p => parseReceipt(p));
+    infos.forEach((inf, i) => { if (infos.length > 1) inf.seq = `${i + 1}/${infos.length}枚目`; });
+    receiptQueue = infos.slice(1);
+    openReceiptReview(infos[0], parts[0], '');
+  };
+}
 /* ===== Googleスプレッドシートとの同期（任意機能） =====
    端末の記録が本体。シートは「自動の控え」で、シート側で直した内容も取り込める。
    同じ記録を両方で変えたときは、更新日時が新しい方を採用する。 */
@@ -1911,7 +2011,7 @@ document.addEventListener('click', e => {
     case 'addcat': openNameSheet('cat', null, ui.setType); break;
     case 'editpay': { const p = S.pays.find(x => x.id === el.dataset.id); if (p) openNameSheet('pay', p); break; }
     case 'addpay': openNameSheet('pay', null); break;
-    case 'receipt': $('#fileReceipt').click(); break;
+    case 'receipt': openReceiptChoice(); break;
     case 'import-csv': $('#fileCsv').click(); break;
     case 'backup': exportBackup(); break;
     case 'restore': $('#fileBackup').click(); break;
