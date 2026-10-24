@@ -1,7 +1,7 @@
 /* オフラインで開けるようにするための Service Worker。
    アプリ本体はネット接続があれば最新を取得し、つながらないときは保存済みを使う。
    文字認識の部品（vendor/）は大きいので、初回に1度だけ保存して以後はそのまま使う。 */
-const VERSION = 'kakeibo-app-v1.3.2';
+const VERSION = 'kakeibo-app-v1.3.3';
 const OCR_CACHE = 'kakeibo-ocr-v1';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'ocr-worker.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 
@@ -39,7 +39,7 @@ self.addEventListener('fetch', e => {
 
   e.respondWith((async () => {
     try {
-      const res = await withTimeout(fetch(req), 4000);
+      const res = await withTimeout(fetch(req, {cache: 'no-cache'}), 4000);   // 配信元の10分キャッシュに頼らず、毎回新しさを確認する
       if (res.ok) { const c = await caches.open(VERSION); c.put(req, res.clone()); }
       return res;
     } catch (err) {

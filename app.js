@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.3.2';
+const APP_VERSION = '1.3.3';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -833,6 +833,8 @@ function renderSettings() {
     <div class="section-title">このアプリについて</div>
     <div class="card">
       <p class="note" style="margin:0">レシートの文字認識はこの端末の中で行い、画像は保存も送信もしません。バージョン ${APP_VERSION}</p>
+      <button type="button" class="btn" data-act="update-app" style="width:100%;margin-top:12px">最新版に更新する</button>
+      <p class="note" style="margin:8px 0 0">記録は消えません。新しい版が反映されないときに押してください。</p>
     </div>`;
 }
 /* ===== 入力シート ===== */
@@ -2031,6 +2033,7 @@ document.addEventListener('click', e => {
     case 'restore': $('#fileBackup').click(); break;
     case 'export-month': exportCsv('month'); break;
     case 'export-all': exportCsv('all'); break;
+    case 'update-app': updateApp(); break;
     case 'sync-setup': openSyncSheet(); break;
     case 'sync-now': syncNow(); break;
     case 'dismiss-install': lsSet(LS_FLAG_INSTALL, '1'); render(); break;
@@ -2042,6 +2045,19 @@ $('#fileCsv').addEventListener('change', e => { const fs = Array.from(e.target.f
 $('#fileBackup').addEventListener('change', e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; handleBackupFile(f); });
 $('#overlay').addEventListener('click', e => { if (e.target === $('#overlay') && !sheetLocked) closeSheet(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#overlay').hidden) closeSheet(); });
+
+/* 新しい版が反映されないとき：保存済みのアプリ本体だけを捨てて取り直す（記録は消えない） */
+async function updateApp() {
+  toast('最新版を確認しています…');
+  try {
+    const reg = 'serviceWorker' in navigator ? await navigator.serviceWorker.getRegistration() : null;
+    if (reg) await reg.update();
+    const files = ['./', 'index.html', 'style.css', 'app.js', 'sw.js', 'ocr-worker.js', 'manifest.webmanifest'];
+    await Promise.all(files.map(f => fetch(f, {cache: 'reload'}).catch(() => null)));
+    if (window.caches) { const keys = await caches.keys(); await Promise.all(keys.filter(k => k.startsWith('kakeibo-app-')).map(k => caches.delete(k))); }
+  } catch (e) {}
+  location.reload();
+}
 
 /* ===== ホーム画面アプリとして使えるようにする ===== */
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
