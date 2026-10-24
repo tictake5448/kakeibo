@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -361,9 +361,9 @@ function findDate(l, now) {
   if ((m = l.match(/(?:^|[^\d])(\d{2})[\/.](\d{1,2})[\/.](\d{1,2})(?!\d)/))) return validDate(2000 + +m[1], +m[2], +m[3], now);
   return null;
 }
-const HEADER_RE = /(店舗\s*[#＃]|端末\s*[#＃]|扱者|責任|[#＃]\s*\d{3,}|ランク|TEL|Tel|電話|FAX|〒|レジ|担当|取引|伝票|会員|責任者|領収|レシート|登録番号|No\.|http|www\.|\d{1,2}:\d{2}|\d{2,4}-\d{2,4}-\d{3,4}|\d{4}\s*[年\/.]\s*\d{1,2}\s*[月\/.]|ありがとう|またお越し|ご来店)/i;
+const HEADER_RE = /(No\.?\s*\d|[ス責]\s*No|会計機|スキャン|領収証|事業者|端末番号|ご利用日|カード\s*[IiＩ][DdＤ]|[IiＩ][CcＣ]通番|取扱内容|売上金額|基本積立|店舗\s*[#＃]|端末\s*[#＃]|扱者|責任|[#＃]\s*\d{3,}|ランク|TEL|Tel|電話|FAX|〒|レジ|担当|取引|伝票|会員|責任者|領収|レシート|登録番号|No\.|http|www\.|\d{1,2}:\d{2}|\d{2,4}-\d{2,4}-\d{3,4}|\d{4}\s*[年\/.]\s*\d{1,2}\s*[月\/.]|ありがとう|またお越し|ご来店)/i;
 const END_RE = /^(小計|合計|総合計|お?買上|お会計|ご?請求|お預|お釣|おつり|釣銭|釣り|税込|対象|外税|内税|内消費税|消費税|クレジット|現金|カード|電子マネー|支払|ポイント|点数|\(?\d+%対象)/;
-const QTY_RE = /^\s*(\d+\s*(コ|個|点|本|袋|枚|パック)?\s*[xX×@*]|[@*]\s*\d|単\s*\d)/;
+const QTY_RE = /^\s*(\d+\s*(コ|個|点|本|袋|枚|パック)?\s*([xX×@]|\*\s*[\d単])|[@*]\s*\d|単\s*\d)/;   // 「0050* 品名」のような商品コードは数量行ではない
 const DISC_RE = /(値引|割引|クーポン|値下|ポイント利用|ポイント値引|割\s*$|引\s*$)/;
 const TOTAL_RE = /(合計|お?買上|お会計|総合計|ご?請求|TOTAL|お支払い?金額)/i;
 const NOT_TOTAL_RE = /(小計|対象|消費税|内税|外税|点数|ポイント|預|釣)/;
@@ -382,7 +382,7 @@ function matchItem(l) {
   for (let i = 0; i < 2; i++) s = s.replace(/\s*(軽|※|\*|★|☆|外|内|\(\s*(?:8|10)\s*%\s*\)|8%|10%)\s*$/, '');
   const la = lastAmount(s);
   if (!la) return null;
-  let label = la.head.replace(/^\d{3,}\s+/, '').replace(/^[*・●○◆◇▪]\s*/, '').replace(/\s+/g, ' ').trim();
+  let label = la.head.replace(/^\d{3,}\s*[*＊]?\s*/, '').replace(/^[*＊・●○◆◇▪]\s*/, '').replace(/\s+/g, ' ').trim();   // 先頭の商品コード（0050*など）を除く
   if (!hasLetter(label) || label.length > 40) return null;
   if (la.amount <= 0 || la.amount > 9999999) return null;
   const nLetters = (label.match(/[A-Za-z぀-ヿ㐀-鿿]/g) || []).length;
@@ -422,7 +422,21 @@ function detectPay(text) {
 /* 戻り値 {date, store, items:[{label,amount,neg}], total, pay, lines} */
 function parseReceipt(text, now) {
   now = now || new Date();
-  const lines = String(text).split(/\r?\n/).map(normLine).filter(Boolean);
+  const lines = [];
+  const rawLines = String(text).split(/\r?\n/).map(normLine).filter(Boolean);
+  const isPriceOnly = l => { const m = l.match(/^¥?\s?-?\s?¥?(\d{1,7})$/); return !!m && (l.includes('¥') || m[1].length >= 2); };
+  const kind = rawLines.map(l => isPriceOnly(l) ? 'P' : (hasLetter(l) && !lastAmount(l) && l.length <= 40 ? 'L' : 'O'));
+  for (let i = 0; i < rawLines.length; i++) {                      // 「品名」の次の行が金額だけのとき（文字認識が列を分けて出す場合）は1行にする
+    let merge = kind[i] === 'L' && kind[i + 1] === 'P';
+    if (merge) {                                                  // 品名が何行も続き、そのあと金額が何行も続くとき（列ごとに出力）は、ここでは結合しない
+      let lr = 0, pr = 0;
+      for (let j = i; j >= 0 && kind[j] === 'L'; j--) lr++;
+      for (let j = i + 1; j < rawLines.length && kind[j] === 'P'; j++) pr++;
+      if (lr >= 2 && pr >= 2) merge = false;
+    }
+    if (merge) { lines.push(rawLines[i] + ' ' + rawLines[i + 1]); i++; }
+    else lines.push(rawLines[i]);
+  }
   const info = {date:null, store:'', items:[], total:null, pay:detectPay(text), brand:detectBrand(text), lines};
   const used = new Set();
   for (let i = 0; i < lines.length; i++) { const d = findDate(lines[i], now); if (d) { info.date = d; used.add(i); break; } }
