@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>月次家計簿</title>
+<meta name="theme-color" content="#EDF1F6" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0C121A" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="家計簿">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app" id="app">
+  <header class="bar">
+    <div class="monthnav">
+      <button class="icon-btn" id="navPrev" data-act="prev" aria-label="前の月"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button>
+      <div class="monthlabel">
+        <span class="mtitle" id="mLabel">　</span>
+        <button class="chip small" id="todayBtn" data-act="today" hidden>今月へ</button>
+      </div>
+      <button class="icon-btn" id="navNext" data-act="next" aria-label="次の月"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button>
+    </div>
+  </header>
+
+  <main>
+    <section id="v-home" aria-label="家計簿">
+      <div id="banner"></div>
+      <div id="summary"></div>
+      <div class="toolbar" id="toolbar">
+        <div class="seg" id="filterSeg" role="group" aria-label="表示する種類">
+          <button type="button" data-act="filter" data-v="all" aria-pressed="true">すべて</button>
+          <button type="button" data-act="filter" data-v="e" aria-pressed="false">支出</button>
+          <button type="button" data-act="filter" data-v="i" aria-pressed="false">収入</button>
+        </div>
+        <input type="search" id="q" placeholder="メモ・カテゴリで検索" aria-label="検索" autocomplete="off" enterkeyhint="search">
+      </div>
+      <div id="list"></div>
+    </section>
+
+    <section id="v-stats" aria-label="分析" hidden>
+      <div class="toolrow">
+        <div class="seg" id="aTypeSeg" role="group" aria-label="種類">
+          <button type="button" class="e" data-act="atype" data-v="e">支出</button>
+          <button type="button" class="i" data-act="atype" data-v="i">収入</button>
+        </div>
+        <div class="seg" id="aBySeg" role="group" aria-label="内訳の切り口">
+          <button type="button" data-act="aby" data-v="cat">カテゴリ別</button>
+          <button type="button" data-act="aby" data-v="pay">支払方法別</button>
+        </div>
+      </div>
+      <div id="stats"></div>
+    </section>
+
+    <section id="v-set" aria-label="設定" hidden>
+      <div id="settings"></div>
+    </section>
+  </main>
+</div>
+
+<div class="fabwrap" id="fabwrap"><div class="fabin">
+  <button class="fab alt" data-act="receipt"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7a2 2 0 0 1 2-2h2l1.2-1.6h5.6L16 5h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><circle cx="12" cy="12" r="3.4"/></svg>レシート</button>
+  <button class="fab" data-act="add"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>入力</button>
+</div></div>
+
+<nav class="tabbar" aria-label="メニュー">
+  <div class="tabin">
+    <button class="tab" data-act="tab" data-tab="home"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h11.5a1 1 0 0 1 1 1V20H7a2 2 0 0 1-2-2V4.5a1 1 0 0 1 1-1z"/><path d="M9 8h6M9 12h6"/></svg>家計簿</button>
+    <button class="tab" data-act="tab" data-tab="stats"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20v-7M12 20V5M19 20V10"/></svg>分析</button>
+    <button class="tab" data-act="tab" data-tab="set"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>設定</button>
+  </div>
+</nav>
+
+<div id="overlay" hidden><div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="入力"></div></div>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<input type="file" id="fileReceipt" accept="image/*" hidden>
+<input type="file" id="fileCsv" accept=".csv,text/csv,text/plain" multiple hidden>
+<input type="file" id="fileBackup" accept=".json,application/json" hidden>
+
+<script src="app.js"></script>
+</body>
+</html>

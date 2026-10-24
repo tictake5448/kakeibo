@@ -1,0 +1,1754 @@
+(() => {
+'use strict';
+/* ===== 定数 ===== */
+const APP_VERSION = '1.1.0';
+const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
+const DEFAULT_CATS = [
+  ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
+  ['utility','水道・光熱費','e',5],['phone','通信費','e',8],['fun','趣味・娯楽','e',9],['beauty','衣服・美容','e',0],
+  ['health','健康・医療','e',4],['edu','教育・教養','e',3],['social','交際費','e',11],['insure','保険','e',10],
+  ['tax','税金・社会保障','e',10],['other_e','その他支出','e',10],
+  ['salary','給与','i',4],['bonus','賞与','i',3],['side','副業','i',6],['other_i','その他収入','i',10]
+].map(([id,name,type,c]) => ({id,name,type,color:PAL[c]}));
+const DEFAULT_PAYS = [
+  {id:'cash',name:'現金',color:PAL[3]},
+  {id:'card',name:'クレジットカード',color:PAL[6]},
+  {id:'emoney',name:'電子マネー',color:PAL[1]},
+  {id:'bank',name:'口座・振込',color:PAL[7]}
+];
+const WD = ['日','月','火','水','木','金','土'];
+const LS_KEY = 'kakeibo-v2';
+const LS_FLAG_INSTALL = 'kakeibo-install-dismissed';
+
+/* ===== ヘルパー ===== */
+const $ = s => document.querySelector(s);
+const pad = n => String(n).padStart(2,'0');
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const yen = n => '¥' + Math.abs(n).toLocaleString('ja-JP');
+const signed = n => n === 0 ? '¥0' : (n < 0 ? '−' : '+') + yen(n);
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+const curMonth = () => todayStr().slice(0,7);
+const shiftMonth = (key, delta) => { const [y,m] = key.split('-').map(Number); const d = new Date(y, m-1+delta, 1); return `${d.getFullYear()}-${pad(d.getMonth()+1)}`; };
+const normDigits = s => s.replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+const lsGet = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+const lsSet = (k,v) => { try { localStorage.setItem(k,v); } catch (e) {} };
+const cashflow = x => x.t === 'i' ? x.a : -x.a;   // 収入は+、支出は−（返金・値引きの負の支出は+になる）
+
+/* ===== 状態 ===== */
+let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
+const store = { mode: 'init', persisted: null, error: false, loaded: false };
+const ui = { tab:'home', month:curMonth(), filter:'all', q:'', aType:'e', aBy:'cat', setType:'e', lastPay:'cash', lastType:'e' };
+
+const catById = id => S.cats.find(c => c.id === id) || {id, name:'未分類', color:'#8A8F98', type:'e'};
+const payById = id => S.pays.find(p => p.id === id) || {id, name:'その他', color:'#8A8F98'};
+const payName = id => payById(id).name;
+const allTx = () => Object.values(S.months).flat();
+const realCount = () => Object.values(S.months).reduce((n,a) => n + a.length, 0);
+const monthTx = k => S.months[k] || [];
+const findTx = id => { for (const arr of Object.values(S.months)) { const x = arr.find(t => t.id === id); if (x) return x; } return null; };
+const sortTx = a => a.slice().sort((x,y) => x.d < y.d ? 1 : x.d > y.d ? -1 : (y.s||0) - (x.s||0));
+
+function totals(k, maxDay) {
+  let i = 0, e = 0;
+  for (const x of monthTx(k)) {
+    if (maxDay && Number(x.d.slice(8)) > maxDay) continue;
+    if (x.t === 'i') i += x.a; else e += x.a;
+  }
+  return {i, e};
+}
+function usageCount(id, field = 'c') {
+  let n = 0;
+  for (const arr of Object.values(S.months)) for (const x of arr) if (x[field] === id) n++;
+  return n;
+}
+
+/* ===== 保存（この端末の IndexedDB。使えなければ localStorage） ===== */
+let idb = null;
+function idbTx(stores, mode, fn) {
+  return new Promise((res, rej) => {
+    const tx = idb.transaction(stores, mode);
+    let out;
+    try { out = fn(tx); } catch (e) { rej(e); try { tx.abort(); } catch (_) {} return; }
+    tx.oncomplete = () => res(out);
+    tx.onerror = () => rej(tx.error);
+    tx.onabort = () => rej(tx.error || new Error('abort'));
+  });
+}
+function openIdb() {
+  return new Promise((res, rej) => {
+    if (!('indexedDB' in window) || !window.indexedDB) { rej(new Error('IndexedDB なし')); return; }
+    const r = indexedDB.open('kakeibo', 1);
+    r.onupgradeneeded = () => {
+      const db = r.result;
+      if (!db.objectStoreNames.contains('months')) db.createObjectStore('months');
+      if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
+    };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+    r.onblocked = () => rej(new Error('blocked'));
+  });
+}
+async function idbLoadAll() {
+  const months = {}; let meta = null;
+  await idbTx(['months','meta'], 'readonly', tx => {
+    const c = tx.objectStore('months').openCursor();
+    c.onsuccess = () => { const cur = c.result; if (cur) { months[cur.key] = cur.value; cur.continue(); } };
+    const g = tx.objectStore('meta').get('settings');
+    g.onsuccess = () => { meta = g.result || null; };
+  });
+  return {months, meta};
+}
+const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+
+function cleanTx(x) {
+  if (!x || typeof x !== 'object') return null;
+  const a = Number(x.a);
+  if (!Number.isFinite(a) || a === 0 || !/^\d{4}-\d{2}-\d{2}$/.test(String(x.d))) return null;
+  const out = {id: String(x.id || uid()), d: String(x.d), t: x.t === 'i' ? 'i' : 'e', c: String(x.c || ''), a: Math.round(a), p: String(x.p || ''), n: String(x.n || '').slice(0, 120), s: Number(x.s) || 0, u: Number(x.u) || 0};
+  if (x.mf) out.mf = String(x.mf);
+  if (x.r) out.r = String(x.r);
+  return out;
+}
+function applyLoaded(months, meta) {
+  const m = {};
+  for (const k of Object.keys(months || {})) {
+    if (!/^\d{4}-\d{2}$/.test(k) || !Array.isArray(months[k])) continue;
+    const arr = months[k].map(cleanTx).filter(Boolean);
+    if (arr.length) m[k] = arr;
+  }
+  S.months = m;
+  if (meta) {
+    const okCat = c => c && typeof c.id === 'string' && typeof c.name === 'string' && (c.type === 'e' || c.type === 'i');
+    if (Array.isArray(meta.cats) && meta.cats.length && meta.cats.every(okCat)) S.cats = meta.cats.map(c => ({id:c.id, name:c.name, type:c.type, color:c.color || '#8A8F98'}));
+    if (Array.isArray(meta.pays) && meta.pays.length && meta.pays.every(p => p && typeof p.id === 'string' && typeof p.name === 'string')) S.pays = meta.pays.map(p => ({id:p.id, name:p.name, color:p.color || '#8A8F98'}));
+    if (meta.learn && typeof meta.learn === 'object' && !Array.isArray(meta.learn)) S.learn = meta.learn;
+    S.lastBackup = Number(meta.lastBackup) || null;
+    if (meta.dels && typeof meta.dels === 'object' && !Array.isArray(meta.dels)) { S.dels = {}; for (const k of Object.keys(meta.dels)) if (Number(meta.dels[k])) S.dels[k] = Number(meta.dels[k]); }
+    if (meta.sync && typeof meta.sync === 'object') S.sync = {url:String(meta.sync.url || ''), key:String(meta.sync.key || ''), auto:meta.sync.auto !== false, last:Number(meta.sync.last) || null};
+  }
+}
+function saveLs() {
+  localStorage.setItem(LS_KEY, JSON.stringify({...metaDoc(), months:S.months}));
+}
+
+let writeChain = Promise.resolve();
+let errorShown = false;
+function enqueue(fn) {
+  writeChain = writeChain.then(fn).then(() => { store.error = false; }).catch(e => {
+    console.warn('保存エラー', e);
+    store.error = true;
+    if (!errorShown) { errorShown = true; toast('保存できませんでした。端末の空き容量を確認してください'); }
+    if (store.loaded) render();
+  });
+  return writeChain;
+}
+function saveMonth(key) {
+  return enqueue(async () => {
+    if (store.mode === 'idb') {
+      const arr = S.months[key];
+      await idbTx(['months'], 'readwrite', tx => {
+        const os = tx.objectStore('months');
+        if (arr && arr.length) os.put(arr, key); else os.delete(key);
+      });
+    } else if (store.mode === 'ls') saveLs();
+  });
+}
+function saveMeta() {
+  return enqueue(async () => {
+    if (store.mode === 'idb') await idbTx(['meta'], 'readwrite', tx => { tx.objectStore('meta').put(metaDoc(), 'settings'); });
+    else if (store.mode === 'ls') saveLs();
+  });
+}
+function saveAll() {
+  return enqueue(async () => {
+    if (store.mode === 'idb') {
+      await idbTx(['months','meta'], 'readwrite', tx => {
+        const os = tx.objectStore('months');
+        os.clear();
+        for (const k of Object.keys(S.months)) if (S.months[k].length) os.put(S.months[k], k);
+        tx.objectStore('meta').put(metaDoc(), 'settings');
+      });
+    } else if (store.mode === 'ls') saveLs();
+  });
+}
+async function askPersist() {
+  try {
+    if (navigator.storage && navigator.storage.persisted) {
+      let p = await navigator.storage.persisted();
+      if (!p && navigator.storage.persist) p = await navigator.storage.persist();
+      store.persisted = !!p;
+    }
+  } catch (e) {}
+}
+async function initStore() {
+  try {
+    idb = await openIdb();
+    const {months, meta} = await idbLoadAll();
+    store.mode = 'idb';
+    applyLoaded(months, meta);
+  } catch (e) {
+    idb = null;
+    try {
+      store.mode = 'ls';
+      const raw = localStorage.getItem(LS_KEY);
+      if (raw) { const o = JSON.parse(raw); applyLoaded(o.months, o); }
+    } catch (e2) { store.mode = 'memory'; }
+  }
+  store.loaded = true;
+  askPersist();
+}
+
+/* ===== データ操作 ===== */
+let lastBatch = null;
+function saveTx(tx, orig) {
+  tx.u = Date.now();
+  delete S.dels[tx.id];
+  if (orig) {
+    const ok = orig.d.slice(0,7);
+    S.months[ok] = (S.months[ok] || []).filter(x => x.id !== orig.id);
+    saveMonth(ok);
+  }
+  const nk = tx.d.slice(0,7);
+  S.months[nk] = [...(S.months[nk] || []), tx];
+  saveMonth(nk);
+  askPersist();
+  scheduleSync();
+}
+function deleteTx(orig) {
+  const ok = orig.d.slice(0,7);
+  S.months[ok] = (S.months[ok] || []).filter(x => x.id !== orig.id);
+  saveMonth(ok);
+  S.dels[orig.id] = Date.now();
+  saveMeta();
+  scheduleSync();
+}
+/* まとめて追加（取り込み・レシート）。取り消し用に追加した分を覚える */
+function addBatch(txs, created) {
+  const months = new Set();
+  const ids = new Set();
+  const nowU = Date.now();
+  for (const tx of txs) {
+    tx.u = nowU;
+    const k = tx.d.slice(0,7);
+    (S.months[k] = S.months[k] || []).push(tx);
+    months.add(k); ids.add(tx.id);
+  }
+  months.forEach(k => saveMonth(k));
+  if (created && (created.cats.length || created.pays.length)) saveMeta();
+  askPersist();
+  scheduleSync();
+  lastBatch = {ids, months, created: created || {cats:[], pays:[]}};
+  return lastBatch;
+}
+function undoBatch(b) {
+  if (!b) return;
+  const tnow = Date.now();
+  for (const id of b.ids) S.dels[id] = tnow;
+  saveMeta();
+  scheduleSync();
+  for (const k of b.months) {
+    S.months[k] = (S.months[k] || []).filter(x => !b.ids.has(x.id));
+    if (!S.months[k].length) delete S.months[k];
+    saveMonth(k);
+  }
+  let metaChanged = false;
+  for (const id of b.created.cats) if (!usageCount(id, 'c')) { S.cats = S.cats.filter(c => c.id !== id); metaChanged = true; }
+  for (const id of b.created.pays) if (!usageCount(id, 'p')) { S.pays = S.pays.filter(p => p.id !== id); metaChanged = true; }
+  if (metaChanged) saveMeta();
+  if (lastBatch === b) lastBatch = null;
+  render();
+  toast('取り消しました');
+}
+/* ===== CSV 読み込み（MoneyForward ME / このアプリのCSV） ===== */
+function decodeText(buf) {
+  const u8 = new Uint8Array(buf);
+  try { return new TextDecoder('utf-8', {fatal:true}).decode(u8); } catch (e) {}
+  try { return new TextDecoder('shift_jis').decode(u8); } catch (e) {}
+  throw new Error('文字コードを変換できませんでした。UTF-8のCSVで保存し直してください');
+}
+function parseCsv(text) {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const rows = []; let row = [], f = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i+1] === '"') { f += '"'; i++; } else q = false; }
+      else f += c;
+    } else if (c === '"' && f === '') q = true;
+    else if (c === ',') { row.push(f); f = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i+1] === '\n') i++; row.push(f); f = ''; rows.push(row); row = []; }
+    else f += c;
+  }
+  if (f !== '' || row.length) { row.push(f); rows.push(row); }
+  return rows.filter(r => !(r.length === 1 && r[0].trim() === ''));
+}
+function parseDateStr(s) {
+  s = normDigits(String(s)).trim();
+  const m = s.match(/^(\d{4})\s*[\/\-.年]\s*(\d{1,2})\s*[\/\-.月]\s*(\d{1,2})/);
+  if (!m) return null;
+  const y = +m[1], mo = +m[2], da = +m[3];
+  if (mo < 1 || mo > 12 || da < 1 || da > 31) return null;
+  return `${y}-${pad(mo)}-${pad(da)}`;
+}
+function parseAmountStr(s) {
+  s = normDigits(String(s)).replace(/[,\s¥￥円]/g, '').replace(/[−‐-―]/g, '-');
+  if (s === '' || !/^-?\d+(\.\d+)?$/.test(s)) return null;
+  return Math.round(Number(s));
+}
+/* 戻り値: {ok, own, rows[], errors, skipped…} 行は {d,t,a,n,big,mid,pay,id,excl,xfer} */
+function parseMoneyCsv(text) {
+  const rows = parseCsv(text);
+  let hi = -1;
+  for (let i = 0; i < Math.min(rows.length, 6); i++) {
+    const r = rows[i].map(s => s.trim());
+    if (r.includes('日付') && r.some(x => x.startsWith('金額'))) { hi = i; break; }
+  }
+  if (hi < 0) return {ok:false, error:'「日付」「金額」の列が見つかりません。MoneyForward MEからダウンロードしたCSVか確認してください'};
+  const h = rows[hi].map(s => s.trim());
+  const idx = name => h.indexOf(name);
+  const col = {calc:idx('計算対象'), date:idx('日付'), name:idx('内容'), amt:h.findIndex(x => x.startsWith('金額')), inst:idx('保有金融機関'),
+    big:idx('大項目'), mid:idx('中項目'), memo:idx('メモ'), xfer:idx('振替'), id:idx('ID'), kind:idx('種別'), cat:idx('カテゴリ'), pay:idx('支払方法')};
+  const own = col.kind >= 0 && col.cat >= 0;
+  const cell = (r, i) => (i >= 0 && i < r.length) ? String(r[i]).trim() : '';
+  const out = []; let errors = 0, zero = 0, noYear = 0;
+  for (let i = hi + 1; i < rows.length; i++) {
+    const r = rows[i];
+    const d = parseDateStr(cell(r, col.date));
+    const amt = parseAmountStr(cell(r, col.amt));
+    if (!d || amt === null) { errors++; if (!d && /^\d{1,2}\s*[\/\-]\s*\d{1,2}/.test(cell(r, col.date))) noYear++; continue; }
+    if (amt === 0) { zero++; continue; }
+    if (own) {
+      const t = cell(r, col.kind) === '収入' ? 'i' : 'e';
+      out.push({d, t, a: amt, n: cell(r, col.memo).slice(0, 80), big: cell(r, col.cat) || '未分類', mid: '', pay: cell(r, col.pay), id: '', excl: false, xfer: false});
+    } else {
+      const name = cell(r, col.name), memo = cell(r, col.memo);
+      out.push({d, t: amt < 0 ? 'e' : 'i', a: Math.abs(amt), n: [name, memo].filter(Boolean).join(' / ').slice(0, 80),
+        big: cell(r, col.big) || '未分類', mid: cell(r, col.mid), pay: cell(r, col.inst),
+        id: cell(r, col.id), excl: cell(r, col.calc) === '0', xfer: cell(r, col.xfer) === '1'});
+    }
+  }
+  if (!out.length) return {ok:false, error: noYear ? '日付に年が含まれていないため読み取れません。Web版の「ダウンロード」で出したCSVを使ってください' : '取り込める行がありません'};
+  return {ok:true, own, rows:out, errors, zero};
+}
+
+/* ===== レシートの文字を解析 ===== */
+const CJK = '\\u3000-\\u30ff\\u3400-\\u9fff\\uff00-\\uffef';
+function fixNumToken(tok) {
+  if (!/\d/.test(tok) || tok.length < 2 || !/^[¥\d,.\-OoIl|]+$/.test(tok)) return tok;
+  return tok.replace(/[Oo]/g, '0').replace(/[Il|]/g, '1');
+}
+function normLine(raw) {
+  let s = String(raw).normalize('NFKC');
+  s = s.replace(/[−‐-―]/g, '-').replace(/[▲△]\s*(?=[¥\\]?\d)/g, '-');
+  s = s.replace(/\\/g, '¥');
+  s = s.replace(/([^A-Za-z\d]|^)[Yy]{1,2}(?=\s?¥?\d)/g, '$1¥').replace(/¥{2,}/g, '¥');
+  for (let i = 0; i < 3; i++) s = s.replace(/(\d)[.,](\d{3})(?!\d)/g, '$1$2');
+  s = s.replace(new RegExp(`([${CJK}])\\s+(?=[${CJK}])`, 'g'), '$1');
+  s = s.split(/(\s+)/).map(t => /\s/.test(t) ? t : fixNumToken(t)).join('');
+  return s.replace(/[ \t]+/g, ' ').trim();
+}
+function validDate(y, m, d, now) {
+  if (y < 2000 || y > now.getFullYear() + 1 || m < 1 || m > 12 || d < 1 || d > 31) return null;
+  const dt = new Date(y, m - 1, d);
+  if (dt.getMonth() !== m - 1) return null;
+  return `${y}-${pad(m)}-${pad(d)}`;
+}
+function findDate(l, now) {
+  let m;
+  if ((m = l.match(/(20\d{2})\s*[年\/.\-]\s*(\d{1,2})\s*[月\/.\-]\s*(\d{1,2})/))) return validDate(+m[1], +m[2], +m[3], now);
+  if ((m = l.match(/令和\s*(\d{1,2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})/))) return validDate(2018 + +m[1], +m[2], +m[3], now);
+  if ((m = l.match(/(?:^|[^\d])(\d{2})[\/.](\d{1,2})[\/.](\d{1,2})(?!\d)/))) return validDate(2000 + +m[1], +m[2], +m[3], now);
+  return null;
+}
+const HEADER_RE = /(TEL|Tel|電話|FAX|〒|レジ|担当|取引|伝票|会員|責任者|領収|レシート|登録番号|No\.|http|www\.|\d{1,2}:\d{2}|\d{2,4}-\d{2,4}-\d{3,4}|\d{4}\s*[年\/.]\s*\d{1,2}\s*[月\/.]|ありがとう|またお越し|ご来店)/i;
+const END_RE = /^(小計|合計|総合計|お?買上|お会計|ご?請求|お預|お釣|おつり|釣銭|釣り|税込|対象|外税|内税|内消費税|消費税|クレジット|現金|カード|電子マネー|支払|ポイント|点数|\(?\d+%対象)/;
+const QTY_RE = /^\s*(\d+\s*(コ|個|点|本|袋|枚|パック)?\s*[xX×@*]|[@*]\s*\d|単\s*\d)/;
+const DISC_RE = /(値引|割引|クーポン|値下|ポイント利用|ポイント値引|割\s*$|引\s*$)/;
+const TOTAL_RE = /(合計|お?買上|お会計|総合計|ご?請求|TOTAL|お支払い?金額)/i;
+const NOT_TOTAL_RE = /(小計|対象|消費税|内税|外税|点数|ポイント|預|釣)/;
+const hasLetter = s => /[A-Za-z぀-ヿ㐀-鿿]/.test(s);
+
+function lastAmount(l) {
+  const toks = l.split(/\s+/);
+  const t = toks[toks.length - 1] || '';
+  const m = t.match(/^(.*?)¥?(-?)¥?(\d{1,7})(-?)円?$/);
+  if (!m || /\d/.test(m[1])) return null;
+  return {amount: Number(m[3]), neg: m[2] === '-' || m[4] === '-', head: toks.slice(0, -1).join(' ') + (m[1] ? ' ' + m[1] : '')};
+}
+function matchItem(l) {
+  if (QTY_RE.test(l)) return null;
+  let s = l;
+  for (let i = 0; i < 2; i++) s = s.replace(/\s*(軽|※|\*|★|☆|外|内|\(\s*(?:8|10)\s*%\s*\)|8%|10%)\s*$/, '');
+  const la = lastAmount(s);
+  if (!la) return null;
+  let label = la.head.replace(/^\d{3,}\s+/, '').replace(/^[*・●○◆◇▪]\s*/, '').replace(/\s+/g, ' ').trim();
+  if (!hasLetter(label) || label.length > 40) return null;
+  if (la.amount <= 0 || la.amount > 9999999) return null;
+  const neg = la.neg || DISC_RE.test(label);
+  return {label, amount: la.amount, neg};
+}
+function isStoreLine(l) {
+  if (HEADER_RE.test(l) || findDate(l, new Date())) return false;
+  if (/^[\d\s\-¥,.:]+$/.test(l)) return false;
+  if (/[都道府県市区町村郡].*\d/.test(l) || /^〒/.test(l)) return false;
+  const letters = (l.match(/[A-Za-z぀-ヿ㐀-鿿]/g) || []).length;
+  return letters >= 2 && l.length <= 30;
+}
+function detectPay(text) {
+  const t = text.normalize('NFKC');
+  let id = null;
+  if (/(クレジット|VISA|JCB|Master|AMEX|ご利用カード)/i.test(t)) id = 'card';
+  else if (/(電子マネー|Suica|PASMO|iD|QUICPay|nanaco|WAON|PayPay|楽天ペイ|d払い|交通系)/i.test(t)) id = 'emoney';
+  else if (/(お預り|お預かり|お釣|おつり|現金)/.test(t)) id = 'cash';
+  return id && S.pays.some(p => p.id === id) ? id : null;
+}
+/* 戻り値 {date, store, items:[{label,amount,neg}], total, pay, lines} */
+function parseReceipt(text, now) {
+  now = now || new Date();
+  const lines = String(text).split(/\r?\n/).map(normLine).filter(Boolean);
+  const info = {date:null, store:'', items:[], total:null, pay:detectPay(text), lines};
+  const used = new Set();
+  for (let i = 0; i < lines.length; i++) { const d = findDate(lines[i], now); if (d) { info.date = d; used.add(i); break; } }
+  for (let i = 0; i < Math.min(lines.length, 8); i++) {
+    if (isStoreLine(lines[i])) { info.store = lines[i].replace(/^(店名|店)[:：]\s*/, '').slice(0, 24); used.add(i); break; }
+  }
+  let started = false, ended = false;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (info.total === null && TOTAL_RE.test(l) && !NOT_TOTAL_RE.test(l)) {
+      const la = lastAmount(l);
+      if (la && la.amount > 0) info.total = la.amount;
+    }
+    if (ended || used.has(i)) continue;
+    if (END_RE.test(l)) { if (started) ended = true; continue; }
+    if (HEADER_RE.test(l)) continue;
+    const it = matchItem(l);
+    if (it) { info.items.push(it); started = true; }
+  }
+  return info;
+}
+
+/* ===== 分類の候補（学習 → キーワード → 店の種類） ===== */
+const KEYWORDS = [
+  ['food', /(牛乳|ミルク|卵|たまご|玉子|パン|米|飯|弁当|おにぎり|寿司|すし|麺|うどん|そば|ラーメン|パスタ|肉|豚|牛|鶏|魚|鮭|野菜|キャベツ|レタス|トマト|きゅうり|たまねぎ|玉ねぎ|にんじん|人参|じゃがいも|大根|果物|りんご|バナナ|みかん|いちご|豆腐|納豆|チーズ|ヨーグルト|バター|ハム|ソーセージ|ベーコン|惣菜|サラダ|菓子|チョコ|スナック|アイス|ジュース|茶|コーヒー|ビール|酒|ワイン|調味料|醤油|味噌|砂糖|ソース|カレー|冷凍|飲料|ドリンク|ランチ|ケーキ|プリン|ゼリー|もやし|ねぎ|ほうれん草|ブロッコリー|ピーマン|なす|きのこ|しいたけ|味付|だし|ふりかけ|海苔)/],
+  ['daily', /(ティッシュ|ティシュ|トイレット|洗剤|シャンプー|リンス|コンディショナー|石鹸|せっけん|ハンドソープ|ボディソープ|歯ブラシ|歯磨|ハミガキ|タオル|ゴミ袋|ごみ袋|ラップ|アルミ|スポンジ|電池|マスク|生理|おむつ|オムツ|柔軟剤|消臭|除菌|綿棒|キッチンペーパー|ポリ袋|電球|洗濯)/],
+  ['health', /(薬|錠|サプリ|目薬|湿布|絆創膏|バンドエイド|胃腸|風邪|頭痛|診察|処方|漢方)/],
+  ['transport', /(切符|乗車|ICチャージ|チャージ|Suica|PASMO|ガソリン|駐車|高速|タクシー|バス|運賃)/],
+  ['fun', /(映画|ゲーム|カラオケ|チケット|入場|ボウリング|玩具|おもちゃ)/],
+  ['edu', /(書籍|本|雑誌|参考書|ノート|文具|ペン|コピー|漫画|マンガ)/],
+  ['beauty', /(化粧|ファンデ|口紅|美容|シャツ|靴下|下着|ズボン|スカート|ネイル|香水)/]
+];
+const STORE_HINTS = [
+  ['health', /(病院|クリニック|医院|歯科|診療|調剤)/],
+  ['daily', /(ドラッグ|ドラック|薬局|マツモトキヨシ|ウエルシア|スギ薬局|ツルハ|サンドラッグ|ココカラ|ダイソー|セリア|ホームセンター|ニトリ|無印)/],
+  ['food', /(スーパー|マート|ストア|ライフ|イオン|西友|コンビニ|ローソン|セブン|ファミリーマート|ミニストップ|マルエツ|ヨーカドー|いなげや|オーケー|サミット|成城石井|生協|食品|市場|青果|精肉|鮮魚|ベーカリー|カフェ|珈琲|レストラン|食堂|ラーメン|寿司|居酒屋|弁当|マクドナルド|吉野家|すき家|松屋)/],
+  ['transport', /(駅|鉄道|電鉄|バス|タクシー|ガソリン|ENEOS|出光|コスモ|駐車|パーキング)/],
+  ['edu', /(書店|ブックス|本屋|文具|文房具|TSUTAYA|蔦屋)/],
+  ['fun', /(映画|シネマ|カラオケ|ボウリング|ゲーム)/],
+  ['beauty', /(ユニクロ|GU|しまむら|洋服|ファッション|美容|サロン|化粧)/]
+];
+function labelKey(label) {
+  const k = String(label).normalize('NFKC').toLowerCase()
+    .replace(/\d+(\.\d+)?\s*(ml|kg|g|l|個|コ|点|本|袋|枚|パック|入|%|円)?/g, ' ')
+    .replace(/[()\[\]*※・\-_/x×@]/g, ' ').replace(/\s+/g, '');
+  return k.length ? k.slice(0, 16) : String(label).slice(0, 8);
+}
+const expCatExists = id => S.cats.some(c => c.id === id && c.type === 'e');
+function storeHint(store) {
+  for (const [id, re] of STORE_HINTS) if (store && re.test(store) && expCatExists(id)) return id;
+  return null;
+}
+function suggestCat(label, store) {
+  const key = labelKey(label);
+  if (!key) return null;
+  if (S.learn[key] && expCatExists(S.learn[key])) return {c:S.learn[key], src:'learn'};
+  if (key.length >= 2) for (const k of Object.keys(S.learn)) {
+    if (k.length >= 2 && (key.includes(k) || k.includes(key)) && expCatExists(S.learn[k])) return {c:S.learn[k], src:'learn'};
+  }
+  for (const [id, re] of KEYWORDS) if (re.test(key) && expCatExists(id)) return {c:id, src:'kw'};
+  const sh = storeHint(store);
+  if (sh) return {c:sh, src:'store'};
+  return null;
+}
+function learnLabel(label, catId) {
+  const key = labelKey(label);
+  if (!key || key.length < 2) return;
+  delete S.learn[key];
+  S.learn[key] = catId;
+  const keys = Object.keys(S.learn);
+  if (keys.length > 600) for (const k of keys.slice(0, keys.length - 500)) delete S.learn[k];
+}
+/* ===== 通知・シート ===== */
+let toastTimer = null;
+function toast(msg, opt) {
+  const el = $('#toast');
+  el.innerHTML = '';
+  const span = document.createElement('span');
+  span.textContent = msg;
+  el.appendChild(span);
+  el.classList.toggle('act', !!(opt && opt.action));
+  if (opt && opt.action) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = opt.action;
+    b.onclick = () => { el.classList.remove('show'); opt.fn(); };
+    el.appendChild(b);
+  }
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), (opt && opt.ms) || 2600);
+}
+let lastFocus = null;
+let sheetClose = null;
+let sheetLocked = false;   // 入力内容が多いシートは、外側をタップしても閉じない
+function openSheet(html, label, onClose) {
+  if (!$('#overlay').hidden && sheetClose) { const f = sheetClose; sheetClose = null; f(); }
+  if ($('#overlay').hidden) lastFocus = document.activeElement;
+  $('#toast').classList.remove('show');
+  const sheet = $('#sheet');
+  sheet.onclick = sheet.onchange = sheet.oninput = null;
+  sheetLocked = false;
+  sheet.setAttribute('aria-label', label || '入力');
+  sheet.innerHTML = html;
+  sheetClose = onClose || null;
+  $('#overlay').hidden = false;
+  document.body.style.overflow = 'hidden';
+  sheet.scrollTop = 0;
+  return sheet;
+}
+function closeSheet() {
+  $('#overlay').hidden = true;
+  $('#sheet').innerHTML = '';
+  document.body.style.overflow = '';
+  sheetLocked = false;
+  if (sheetClose) { const f = sheetClose; sheetClose = null; try { f(); } catch (e) {} }
+  if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
+}
+const XICON = '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+const closeBtn = id => `<button type="button" class="icon-btn" id="${id}" aria-label="閉じる">${XICON}</button>`;
+
+/* ===== 画面の描画 ===== */
+function isStandalone() { return !!(navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches)); }
+function isIos() { return /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); }
+const DAY = 86400000;
+
+function render() {
+  renderBar();
+  for (const id of ['home','stats','set']) $('#v-' + id).hidden = ui.tab !== id;
+  document.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-current', b.dataset.tab === ui.tab ? 'page' : 'false'));
+  $('#fabwrap').hidden = ui.tab === 'set';
+  if (ui.tab === 'home') { renderBanner(); renderSummary(); renderFilter(); renderList(); }
+  else if (ui.tab === 'stats') renderStats();
+  else renderSettings();
+}
+
+function renderBar() {
+  const [y,m] = ui.month.split('-').map(Number);
+  const isSet = ui.tab === 'set';
+  $('#mLabel').textContent = isSet ? '設定' : `${y}年${m}月`;
+  $('#navPrev').style.visibility = $('#navNext').style.visibility = isSet ? 'hidden' : 'visible';
+  $('#todayBtn').hidden = isSet || ui.month === curMonth();
+}
+
+function renderBanner() {
+  const parts = [];
+  if (store.mode === 'memory' || store.error) {
+    parts.push(`<div class="banner warn"><div><b>記録を保存できません。</b>このまま閉じると入力した内容が消えます。ブラウザの設定でサイトデータの保存を許可してください。</div></div>`);
+  }
+  if (isIos() && !isStandalone() && lsGet(LS_FLAG_INSTALL) !== '1') {
+    parts.push(`<div class="banner warn"><div><b>ホーム画面に追加してください。</b>Safariのまま使うと、しばらく開かない間に記録が消えることがあります。共有ボタン →「ホーム画面に追加」で追加できます。</div><div class="acts"><button class="chip small" data-act="dismiss-install">閉じる</button></div></div>`);
+  }
+  const n = realCount();
+  const days = S.lastBackup ? Math.floor((Date.now() - S.lastBackup) / DAY) : null;
+  if (n >= 20 && (days === null || days >= 30)) {
+    parts.push(`<div class="banner"><div><b>バックアップがありません。</b>${days === null ? '' : `最後に取ったのは${days}日前です。`}機種変更や端末の故障に備えて、ときどき書き出してください。</div><div class="acts"><button class="chip small" data-act="backup">書き出す</button></div></div>`);
+  }
+  $('#banner').innerHTML = parts.join('');
+}
+
+function renderSummary() {
+  if (!store.loaded) { $('#summary').innerHTML = '<div class="card"><p class="muted" style="margin:0">読み込み中…</p></div>'; return; }
+  const [y,m] = ui.month.split('-').map(Number);
+  const t = totals(ui.month);
+  const net = t.i - t.e;
+  const isCur = ui.month === curMonth();
+  const prev = totals(shiftMonth(ui.month, -1), isCur ? new Date().getDate() : 0);
+  let cmp = '';
+  if (prev.e > 0) {
+    const pct = Math.round((t.e - prev.e) / prev.e * 100);
+    cmp = `${isCur ? '前月の同日比' : '前月比'} ${pct > 0 ? '+' : pct < 0 ? '−' : ''}${Math.abs(pct)}%`;
+  }
+  const used = t.i > 0 ? Math.round(t.e / t.i * 100) : null;
+  const meter = used === null
+    ? (t.e > 0 ? '<div class="meter-cap">この月の収入がまだ記録されていません</div>' : '')
+    : `<div class="meter${used > 100 ? ' over' : ''}" role="img" aria-label="収入の${used}%を支出"><i style="width:${Math.max(0, Math.min(100, used))}%"></i></div><div class="meter-cap">収入の${used}%を支出に使用</div>`;
+  $('#summary').innerHTML = `
+    <div class="card">
+      <div class="lbl">${m}月の収支</div>
+      <div class="big${net < 0 ? ' exp' : ''}">${signed(net)}</div>
+      <div class="split">
+        <div><span class="lbl">収入</span><b class="inc">${yen(t.i)}</b></div>
+        <div><span class="lbl">支出</span><b class="exp">${yen(t.e)}</b>${cmp ? `<small>${cmp}</small>` : ''}</div>
+      </div>
+      ${meter}
+    </div>`;
+}
+
+function renderFilter() {
+  document.querySelectorAll('#filterSeg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === ui.filter)));
+  $('#toolbar').hidden = store.loaded && realCount() === 0;
+}
+
+function renderList() {
+  const box = $('#list');
+  if (!store.loaded) { box.innerHTML = ''; return; }
+  if (realCount() === 0) {
+    box.innerHTML = `
+      <div class="welcome card">
+        <h2>最初の記録を入れましょう</h2>
+        <p>この家計簿のデータは、この端末の中にだけ保存されます。</p>
+        <button type="button" class="btn primary" data-act="import-csv">MoneyForwardのCSVを取り込む</button>
+        <button type="button" class="btn" data-act="receipt">レシートを読み取る</button>
+        <button type="button" class="btn" data-act="add">自分で入力する</button>
+      </div>`;
+    return;
+  }
+  const q = ui.q.trim().toLowerCase();
+  const source = q ? allTx() : monthTx(ui.month);
+  const list = sortTx(source).filter(x => {
+    if (ui.filter !== 'all' && x.t !== ui.filter) return false;
+    if (!q) return true;
+    return (x.n || '').toLowerCase().includes(q) || catById(x.c).name.toLowerCase().includes(q) || payName(x.p).toLowerCase().includes(q);
+  });
+  if (!list.length) {
+    box.innerHTML = q || ui.filter !== 'all'
+      ? '<div class="empty">条件に合う記録がありません。</div>'
+      : '<div class="empty">この月の記録はまだありません。<br>右下の「入力」か「レシート」から追加できます。</div>';
+    return;
+  }
+  const shown = list.slice(0, 400);
+  const groups = [];
+  for (const x of shown) {
+    const g = groups[groups.length - 1];
+    if (g && g.d === x.d) g.items.push(x); else groups.push({d:x.d, items:[x]});
+  }
+  const today = todayStr();
+  box.innerHTML = groups.map(g => {
+    const [y,m,d] = g.d.split('-').map(Number);
+    const wd = WD[new Date(y, m-1, d).getDay()];
+    const ex = g.items.filter(x => x.t === 'e').reduce((s,x) => s + x.a, 0);
+    const inc = g.items.filter(x => x.t === 'i').reduce((s,x) => s + x.a, 0);
+    const sum = [inc ? `収入 ${yen(inc)}` : '', ex ? `支出 ${yen(ex)}` : ''].filter(Boolean).join('　');
+    const rows = g.items.map(x => {
+      const c = catById(x.c);
+      const sub = [x.n, payName(x.p)].filter(Boolean).join(' · ');
+      const cf = cashflow(x);
+      return `<button type="button" class="row" data-act="edit" data-id="${esc(x.id)}">
+        <i class="dot" style="background:${c.color}"></i>
+        <span class="main"><span class="cat">${esc(c.name)}</span><span class="sub">${esc(sub)}</span></span>
+        <span class="amt${cf > 0 ? ' inc' : ''}">${cf > 0 ? '+' : '−'}${yen(x.a)}</span>
+      </button>`;
+    }).join('');
+    return `<div class="day"><div class="dayhead"><span>${q ? y + '年' : ''}${m}月${d}日（${wd}）${g.d === today ? '<span class="today">今日</span>' : ''}</span><span class="num">${sum}</span></div><div class="rows">${rows}</div></div>`;
+  }).join('') + (list.length > shown.length ? `<div class="empty">ほか${list.length - shown.length}件。検索で絞り込んでください。</div>` : '');
+}
+
+function breakdown(key, type, by) {
+  const map = {};
+  for (const x of monthTx(key)) {
+    if (x.t !== type) continue;
+    const k = by === 'cat' ? x.c : x.p;
+    map[k] = (map[k] || 0) + x.a;
+  }
+  return Object.entries(map).map(([id,v]) => {
+    const o = by === 'cat' ? catById(id) : payById(id);
+    return {name:o.name, color:o.color, v};
+  }).sort((a,b) => b.v - a.v);
+}
+
+function renderStats() {
+  document.querySelectorAll('#aTypeSeg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === ui.aType)));
+  document.querySelectorAll('#aBySeg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === ui.aBy)));
+  if (!store.loaded) { $('#stats').innerHTML = ''; return; }
+  const m = Number(ui.month.slice(5));
+  const rows = breakdown(ui.month, ui.aType, ui.aBy);
+  const total = rows.reduce((s,r) => s + r.v, 0);
+  const max = rows.length ? Math.max(1, rows[0].v) : 0;
+  const word = ui.aType === 'e' ? '支出' : '収入';
+  const rankHtml = rows.length ? rows.map(r => {
+    const pct = total > 0 ? r.v / total * 100 : 0;
+    return `<div class="rank"><div class="rtop"><span class="rname"><i class="dot" style="background:${r.color}"></i>${esc(r.name)}</span><span class="rval"><span class="amt">${r.v < 0 ? '−' : ''}${yen(r.v)}</span><span class="pct">${pct < 1 && pct > 0 ? '<1' : Math.round(Math.max(0, pct))}%</span></span></div><div class="rbar"><i style="width:${max ? Math.max(0, r.v) / max * 100 : 0}%;background:${r.color}"></i></div></div>`;
+  }).join('') : `<div class="empty">この月の${word}はまだありません。</div>`;
+
+  const keys = [5,4,3,2,1,0].map(i => shiftMonth(ui.month, -i));
+  const tt = keys.map(k => ({k, ...totals(k)}));
+  const maxV = Math.max(1, ...tt.flatMap(t => [t.i, t.e]));
+  const cols = tt.map(t => {
+    const mm = Number(t.k.slice(5));
+    const hi = t.i > 0 ? Math.max(2, t.i / maxV * 100) : 0;
+    const he = t.e > 0 ? Math.max(2, t.e / maxV * 100) : 0;
+    return `<button type="button" class="tcol" data-act="goto" data-m="${t.k}" aria-current="${t.k === ui.month}" aria-label="${mm}月 収入${yen(t.i)} 支出${yen(t.e)}"><span class="bars"><i class="ib" style="height:${hi}%"></i><i class="eb" style="height:${he}%"></i></span><span class="tl">${mm}月</span></button>`;
+  }).join('');
+  const cur = tt[tt.length - 1];
+  $('#stats').innerHTML = `
+    <div class="card">
+      <div class="lbl">${m}月の${word}合計</div>
+      <div class="big${ui.aType === 'e' ? ' exp' : ' inc'}" style="margin-bottom:8px">${yen(total)}</div>
+      ${rankHtml}
+    </div>
+    <div class="section-title">直近6か月の推移</div>
+    <div class="card">
+      <div class="trend" role="group" aria-label="直近6か月の収入と支出">${cols}</div>
+      <div class="legend"><span><i style="background:var(--income)"></i>収入</span><span><i style="background:var(--expense)"></i>支出</span><span>棒の最大値 ${yen(maxV)}</span></div>
+      <p class="caption num">${m}月：収入 ${yen(cur.i)} ／ 支出 ${yen(cur.e)}</p>
+    </div>`;
+}
+
+function dateRangeText() {
+  const ds = allTx().map(x => x.d).sort();
+  if (!ds.length) return '記録なし';
+  const f = s => s.slice(0,4) + '年' + Number(s.slice(5,7)) + '月';
+  return f(ds[0]) + (ds[0].slice(0,7) === ds[ds.length-1].slice(0,7) ? '' : ' 〜 ' + f(ds[ds.length-1]));
+}
+
+function renderSettings() {
+  const cats = S.cats.filter(c => c.type === ui.setType);
+  const modeName = {idb:'この端末（IndexedDB）', ls:'この端末（localStorage）', memory:'保存できていません', init:'確認中'}[store.mode];
+  const catRows = cats.map(c => `<button type="button" class="row" data-act="editcat" data-id="${esc(c.id)}"><i class="dot" style="background:${c.color}"></i><span class="main"><span class="cat">${esc(c.name)}</span></span><span class="muted" style="font-size:13px">${usageCount(c.id)}件</span></button>`).join('') || '<div class="empty">カテゴリがありません。</div>';
+  const payRows = S.pays.map(p => `<button type="button" class="row" data-act="editpay" data-id="${esc(p.id)}"><i class="dot" style="background:${p.color}"></i><span class="main"><span class="cat">${esc(p.name)}</span></span><span class="muted" style="font-size:13px">${usageCount(p.id, 'p')}件</span></button>`).join('') || '<div class="empty">支払方法がありません。</div>';
+  const bk = S.lastBackup ? new Date(S.lastBackup).toLocaleDateString('ja-JP') : 'まだありません';
+  $('#settings').innerHTML = `
+    <div class="card">
+      <p class="sub-title">データの保存</p>
+      <dl class="kv">
+        <dt>保存先</dt><dd>${modeName}</dd>
+        <dt>記録</dt><dd>${realCount().toLocaleString('ja-JP')}件（${dateRangeText()}）</dd>
+        <dt>最後のバックアップ</dt><dd>${bk}</dd>
+        <dt>ホーム画面から起動</dt><dd>${isStandalone() ? 'はい' : 'いいえ'}</dd>
+        <dt>自動削除の保護</dt><dd>${store.persisted === true ? '許可されています' : store.persisted === false ? '未許可' : '不明'}</dd>
+      </dl>
+      <p class="note" style="margin-left:0">記録はこの端末の中だけに保存され、外部のサーバーには送られません。端末を替えるときは、バックアップを書き出して新しい端末で復元してください。</p>
+    </div>
+    <div class="section-title">スプレッドシート連携</div>
+    ${syncCardHtml()}
+    <div class="section-title">取り込み</div>
+    <div class="stack">
+      <button type="button" class="btn" data-act="import-csv">MoneyForwardのCSVを取り込む</button>
+    </div>
+    <p class="note">MoneyForward MEの家計簿画面で月を選び、下の「ダウンロード」で保存したCSVです。複数の月をまとめて選べます。</p>
+    <div class="section-title">カテゴリ</div>
+    <div class="seg" id="setTypeSeg" role="group" aria-label="カテゴリの種類" style="margin-bottom:10px">
+      <button type="button" class="e" data-act="settype" data-v="e" aria-pressed="${ui.setType === 'e'}">支出</button>
+      <button type="button" class="i" data-act="settype" data-v="i" aria-pressed="${ui.setType === 'i'}">収入</button>
+    </div>
+    <div class="rows">${catRows}</div>
+    <div style="margin-top:10px"><button type="button" class="btn" data-act="addcat" style="width:100%">＋ カテゴリを追加</button></div>
+    <div class="section-title">支払方法</div>
+    <div class="rows">${payRows}</div>
+    <div style="margin-top:10px"><button type="button" class="btn" data-act="addpay" style="width:100%">＋ 支払方法を追加</button></div>
+    <div class="section-title">バックアップ</div>
+    <div class="stack">
+      <button type="button" class="btn" data-act="backup">バックアップを書き出す</button>
+      <button type="button" class="btn" data-act="restore">バックアップから復元する</button>
+    </div>
+    <p class="note">書き出したファイルは「ファイル」アプリやiCloud Driveに保存しておくと安全です。</p>
+    <div class="section-title">CSVで書き出す</div>
+    <div class="stack">
+      <button type="button" class="btn" data-act="export-month">表示中の月をCSVで書き出す</button>
+      <button type="button" class="btn" data-act="export-all">すべての記録をCSVで書き出す</button>
+    </div>
+    <p class="note">ExcelなどにそのままCSVを開けます。このアプリへ再び取り込むこともできます。</p>
+    <div class="section-title">このアプリについて</div>
+    <div class="card">
+      <p class="note" style="margin:0">レシートの文字認識はこの端末の中で行い、画像は保存も送信もしません。バージョン ${APP_VERSION}</p>
+    </div>`;
+}
+/* ===== 入力シート ===== */
+function defaultDate() { const t = todayStr(); return t.slice(0,7) === ui.month ? t : ui.month + '-01'; }
+const payChips = (selected, orig) => {
+  const list = S.pays.slice();
+  if (orig && selected && !list.some(p => p.id === selected)) list.push({id:selected, name:'その他'});
+  return list.map(p => `<button type="button" class="chip" data-p="${esc(p.id)}" aria-pressed="${p.id === selected}">${esc(p.name)}</button>`).join('');
+};
+
+function openTxSheet(orig) {
+  const d = orig ? {...orig} : {d:defaultDate(), t:ui.lastType, c:null, a:0, p:S.pays.some(p => p.id === ui.lastPay) ? ui.lastPay : (S.pays[0] ? S.pays[0].id : ''), n:''};
+  let confirming = false;
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2 id="fTitle"></h2>${closeBtn('fClose')}</div>
+    <div class="seg" id="fType" role="group" aria-label="種類">
+      <button type="button" class="e" data-t="e">支出</button>
+      <button type="button" class="i" data-t="i">収入</button>
+    </div>
+    <label class="field"><span class="flabel">金額</span><span class="amount"><b>¥</b><input id="fAmt" type="text" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="金額"></span></label>
+    <div class="field"><span class="flabel">カテゴリ</span><div class="chips" id="fCats"></div></div>
+    <label class="field"><span class="flabel">日付</span><input id="fDate" type="date"></label>
+    <div class="field"><span class="flabel">支払方法</span><div class="chips" id="fPays"></div></div>
+    <label class="field"><span class="flabel">メモ</span><input id="fMemo" type="text" maxlength="80" placeholder="例：スーパー" autocomplete="off"></label>
+    <p class="err" id="fErr" role="alert"></p>
+    <div class="sheet-foot" id="fActions"></div>`, orig ? '記録を編集' : '記録を入力');
+
+  const fAmt = sheet.querySelector('#fAmt'), fDate = sheet.querySelector('#fDate'), fMemo = sheet.querySelector('#fMemo'), fErr = sheet.querySelector('#fErr');
+  fAmt.value = d.a ? d.a.toLocaleString('ja-JP') : '';
+  fDate.value = d.d;
+  fMemo.value = d.n || '';
+  const err = msg => { fErr.textContent = msg; };
+  const paintHead = () => {
+    sheet.querySelector('#fTitle').textContent = orig ? '記録を編集' : (d.t === 'e' ? '支出を入力' : '収入を入力');
+    sheet.querySelectorAll('#fType button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.t === d.t)));
+  };
+  const paintCats = () => {
+    const list = S.cats.filter(c => c.type === d.t);
+    if (!list.some(c => c.id === d.c) && !(orig && orig.c === d.c && orig.t === d.t)) d.c = list[0] ? list[0].id : null;
+    const items = list.slice();
+    if (orig && orig.t === d.t && d.c && !items.some(c => c.id === d.c)) items.push(catById(d.c));
+    sheet.querySelector('#fCats').innerHTML = items.length
+      ? items.map(c => `<button type="button" class="chip" data-c="${esc(c.id)}" aria-pressed="${c.id === d.c}"><i class="dot" style="background:${c.color}"></i>${esc(c.name)}</button>`).join('')
+      : '<span class="muted">カテゴリがありません。設定から追加してください。</span>';
+  };
+  const paintPays = () => { sheet.querySelector('#fPays').innerHTML = payChips(d.p, orig); };
+  const paintActions = () => {
+    const box = sheet.querySelector('#fActions');
+    if (confirming) {
+      box.innerHTML = `<div class="confirm"><p><b>この記録を削除しますか？</b>元に戻せません。</p><div class="actions"><button type="button" class="btn" id="fNo">やめる</button><button type="button" class="btn danger solid primary" id="fYes">削除する</button></div></div>`;
+      box.querySelector('#fNo').onclick = () => { confirming = false; paintActions(); };
+      box.querySelector('#fYes').onclick = () => { deleteTx(orig); closeSheet(); toast('削除しました'); render(); };
+    } else {
+      box.innerHTML = `<div class="actions">${orig ? '<button type="button" class="btn danger" id="fDel">削除</button>' : ''}<button type="button" class="btn primary" id="fSave">保存</button></div>`;
+      const del = box.querySelector('#fDel');
+      if (del) del.onclick = () => { confirming = true; paintActions(); };
+      box.querySelector('#fSave').onclick = save;
+    }
+  };
+  const save = () => {
+    const raw = normDigits(fAmt.value);
+    const neg = /^\s*-/.test(raw);
+    const a = parseInt(raw.replace(/\D/g, '') || '0', 10) * (neg ? -1 : 1);
+    if (!a) { err('金額を入力してください。'); fAmt.focus(); return; }
+    if (!d.c) { err('カテゴリを選んでください。'); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fDate.value)) { err('日付を入力してください。'); fDate.focus(); return; }
+    const tx = {id: orig ? orig.id : uid(), d: fDate.value, t: d.t, c: d.c, a, p: d.p, n: fMemo.value.trim().slice(0,80), s: orig ? (orig.s || Date.now()) : Date.now()};
+    if (orig && orig.mf) tx.mf = orig.mf;
+    if (orig && orig.r) tx.r = orig.r;
+    saveTx(tx, orig);
+    ui.lastPay = d.p; ui.lastType = d.t;
+    ui.month = tx.d.slice(0,7);
+    closeSheet();
+    toast(orig ? '更新しました' : '記録しました');
+    render();
+  };
+  const fmtAmt = () => {
+    const neg = /^\s*-/.test(fAmt.value);
+    const pos = fAmt.selectionStart == null ? fAmt.value.length : fAmt.selectionStart;
+    const digitsBefore = normDigits(fAmt.value.slice(0, pos)).replace(/\D/g, '').length;
+    const digits = normDigits(fAmt.value).replace(/\D/g, '').replace(/^0+(?=\d)/, '').slice(0, 9);
+    const out = digits ? (neg ? '-' : '') + Number(digits).toLocaleString('ja-JP') : '';
+    fAmt.value = out;
+    let count = 0, p = neg ? 1 : 0;
+    while (p < out.length && count < digitsBefore) { if (/\d/.test(out[p])) count++; p++; }
+    try { fAmt.setSelectionRange(p, p); } catch (e) {}
+  };
+  let composing = false;
+  fAmt.addEventListener('compositionstart', () => { composing = true; });
+  fAmt.addEventListener('compositionend', () => { composing = false; fmtAmt(); });
+  fAmt.addEventListener('input', () => { if (!composing) { fmtAmt(); err(''); } });
+  fAmt.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); fAmt.blur(); } });
+  sheet.querySelector('#fClose').onclick = closeSheet;
+  sheet.querySelector('#fType').onclick = e => { const b = e.target.closest('button[data-t]'); if (!b) return; d.t = b.dataset.t; d.c = null; paintHead(); paintCats(); err(''); };
+  sheet.querySelector('#fCats').onclick = e => { const b = e.target.closest('button[data-c]'); if (!b) return; d.c = b.dataset.c; paintCats(); err(''); };
+  sheet.querySelector('#fPays').onclick = e => { const b = e.target.closest('button[data-p]'); if (!b) return; d.p = b.dataset.p; paintPays(); };
+  paintHead(); paintCats(); paintPays(); paintActions();
+  if (!orig) setTimeout(() => { try { fAmt.focus(); } catch (e) {} }, 60);
+}
+
+/* ===== カテゴリ・支払方法の編集シート ===== */
+function swatchesHtml(sel) {
+  return PAL.map((c,i) => `<button type="button" class="sw" data-c="${c}" style="background:${c}" aria-label="色${i+1}" aria-pressed="${c === sel}"></button>`).join('');
+}
+function openNameSheet(kind, item, type) {
+  const isCat = kind === 'cat';
+  const word = isCat ? 'カテゴリ' : '支払方法';
+  const list = isCat ? S.cats : S.pays;
+  const isNew = !item;
+  const d = item ? {...item} : (isCat ? {id:'c' + uid(), name:'', type, color:PAL[S.cats.length % PAL.length]} : {id:'p' + uid(), name:'', color:PAL[(S.pays.length + 3) % PAL.length]});
+  const used = isNew ? 0 : usageCount(d.id, isCat ? 'c' : 'p');
+  let confirming = false;
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>${word}を${isNew ? '追加' : '編集'}</h2>${closeBtn('nClose')}</div>
+    ${isCat ? `<p class="muted" style="margin:0">${d.type === 'e' ? '支出' : '収入'}のカテゴリ</p>` : ''}
+    <label class="field"><span class="flabel">名前</span><input id="nName" type="text" maxlength="16" autocomplete="off" placeholder="${isCat ? '例：ペット' : '例：PayPay、楽天カード'}"></label>
+    <div class="field"><span class="flabel">色</span><div class="swatches" id="nSw"></div></div>
+    ${isNew ? '' : `<p class="note" style="margin-left:0">${used ? `${used}件の記録で使われているため、削除できません。名前と色は変更できます。` : `この${word}を使った記録はありません。`}</p>`}
+    <p class="err" id="nErr" role="alert"></p>
+    <div class="sheet-foot" id="nActions"></div>`, `${word}を${isNew ? '追加' : '編集'}`);
+  const nName = sheet.querySelector('#nName'), nErr = sheet.querySelector('#nErr');
+  nName.value = d.name;
+  const paintSw = () => { sheet.querySelector('#nSw').innerHTML = swatchesHtml(d.color); };
+  const canDelete = !isNew && !used && (isCat || list.length > 1);
+  const paintActions = () => {
+    const box = sheet.querySelector('#nActions');
+    if (confirming) {
+      box.innerHTML = `<div class="confirm"><p><b>「${esc(d.name)}」を削除しますか？</b></p><div class="actions"><button type="button" class="btn" id="nNo">やめる</button><button type="button" class="btn danger solid primary" id="nYes">削除する</button></div></div>`;
+      box.querySelector('#nNo').onclick = () => { confirming = false; paintActions(); };
+      box.querySelector('#nYes').onclick = () => {
+        if (isCat) S.cats = S.cats.filter(c => c.id !== d.id); else S.pays = S.pays.filter(p => p.id !== d.id);
+        saveMeta(); closeSheet(); toast('削除しました'); render();
+      };
+    } else {
+      box.innerHTML = `<div class="actions">${canDelete ? '<button type="button" class="btn danger" id="nDel">削除</button>' : ''}<button type="button" class="btn primary" id="nSave">保存</button></div>`;
+      const del = box.querySelector('#nDel');
+      if (del) del.onclick = () => { confirming = true; paintActions(); };
+      box.querySelector('#nSave').onclick = () => {
+        const name = nName.value.trim();
+        if (!name) { nErr.textContent = '名前を入力してください。'; nName.focus(); return; }
+        if (list.some(x => x.id !== d.id && x.name === name && (!isCat || x.type === d.type))) { nErr.textContent = `同じ名前の${word}があります。`; return; }
+        d.name = name;
+        if (isCat) S.cats = isNew ? [...S.cats, d] : S.cats.map(c => c.id === d.id ? d : c);
+        else S.pays = isNew ? [...S.pays, d] : S.pays.map(p => p.id === d.id ? d : p);
+        saveMeta(); closeSheet(); toast('保存しました'); render();
+      };
+    }
+  };
+  sheet.querySelector('#nClose').onclick = closeSheet;
+  sheet.querySelector('#nSw').onclick = e => { const b = e.target.closest('button[data-c]'); if (!b) return; d.color = b.dataset.c; paintSw(); };
+  nName.addEventListener('input', () => { nErr.textContent = ''; });
+  paintSw(); paintActions();
+  if (isNew) setTimeout(() => { try { nName.focus(); } catch (e) {} }, 60);
+}
+
+/* ===== ファイルの書き出し ===== */
+async function shareOrDownload(text, filename, mime) {
+  const blob = new Blob([text], {type: mime});
+  try {
+    const file = new File([blob], filename, {type: mime});
+    if (navigator.canShare && navigator.canShare({files: [file]})) {
+      try { await navigator.share({files: [file]}); return 'shared'; }
+      catch (e) { if (e && e.name === 'AbortError') return 'cancelled'; }
+    }
+  } catch (e) {}
+  try {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 15000);
+    return 'downloaded';
+  } catch (e) { return 'failed'; }
+}
+function openCopySheet(text, fname) {
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>内容をコピー</h2>${closeBtn('vClose')}</div>
+    <p class="muted" style="margin-top:0">この環境ではファイルを保存できませんでした。コピーして、メモアプリなどに貼り付けて保存してください（${esc(fname)}）。</p>
+    <textarea id="vText" readonly></textarea>
+    <div class="sheet-foot"><div class="actions"><button type="button" class="btn primary" id="vCopy">コピー</button></div></div>`, '内容をコピー');
+  const ta = sheet.querySelector('#vText');
+  ta.value = text.replace(/^﻿/, '');
+  sheet.querySelector('#vClose').onclick = closeSheet;
+  sheet.querySelector('#vCopy').onclick = async () => {
+    try { await navigator.clipboard.writeText(ta.value); toast('コピーしました'); }
+    catch (e) { ta.focus(); ta.select(); toast('選択しました。コピーしてください'); }
+  };
+}
+async function deliverFile(text, filename, mime) {
+  const r = await shareOrDownload(text, filename, mime);
+  if (r === 'failed') openCopySheet(text, filename);
+  return r;
+}
+const csvCell = v => {
+  let s = String(v);
+  if (typeof v === 'string' && /^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+};
+function csvFor(keys) {
+  const rows = [['日付','種別','カテゴリ','金額','支払方法','メモ']];
+  const all = keys.flatMap(k => S.months[k] || []).sort((a,b) => a.d < b.d ? -1 : a.d > b.d ? 1 : (a.s||0) - (b.s||0));
+  for (const x of all) rows.push([x.d, x.t === 'i' ? '収入' : '支出', catById(x.c).name, x.a, payName(x.p), x.n || '']);
+  return '﻿' + rows.map(r => r.map(csvCell).join(',')).join('\r\n');
+}
+async function exportCsv(scope) {
+  const keys = scope === 'month' ? [ui.month] : Object.keys(S.months);
+  if (keys.every(k => !(S.months[k] || []).length)) { toast('書き出す記録がありません'); return; }
+  const r = await deliverFile(csvFor(keys), scope === 'month' ? `kakeibo-${ui.month}.csv` : 'kakeibo-all.csv', 'text/csv');
+  if (r === 'shared' || r === 'downloaded') toast('書き出しました');
+}
+
+/* ===== バックアップ ===== */
+async function exportBackup() {
+  if (!realCount() && !Object.keys(S.learn).length) { toast('バックアップする記録がありません'); return; }
+  const data = {app:'kakeibo', version:1, exportedAt:new Date().toISOString(), cats:S.cats, pays:S.pays, learn:S.learn, months:S.months};
+  const d = todayStr().replace(/-/g, '');
+  const r = await deliverFile(JSON.stringify(data), `kakeibo-backup-${d}.json`, 'application/json');
+  if (r === 'shared' || r === 'downloaded') {
+    S.lastBackup = Date.now(); saveMeta();
+    toast('バックアップを書き出しました');
+    render();
+  }
+}
+async function handleBackupFile(file) {
+  if (!file) return;
+  let obj;
+  try { obj = JSON.parse(await file.text()); } catch (e) { toast('バックアップファイルを読み込めません'); return; }
+  if (!obj || obj.app !== 'kakeibo' || !obj.months || typeof obj.months !== 'object') { toast('このアプリのバックアップではありません'); return; }
+  const months = {}; let n = 0, bad = 0;
+  for (const k of Object.keys(obj.months)) {
+    if (!/^\d{4}-\d{2}$/.test(k) || !Array.isArray(obj.months[k])) continue;
+    const arr = [];
+    for (const x of obj.months[k]) { const c = cleanTx(x); if (c && c.d.slice(0,7) === k) arr.push(c); else bad++; }
+    if (arr.length) { months[k] = arr; n += arr.length; }
+  }
+  const ds = Object.values(months).flat().map(x => x.d).sort();
+  const range = ds.length ? `${ds[0]} 〜 ${ds[ds.length-1]}` : '記録なし';
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>バックアップから復元</h2>${closeBtn('bClose')}</div>
+    <div class="card"><dl class="kv"><dt>記録</dt><dd>${n.toLocaleString('ja-JP')}件</dd><dt>期間</dt><dd>${esc(range)}</dd><dt>書き出した日時</dt><dd>${esc(obj.exportedAt ? new Date(obj.exportedAt).toLocaleString('ja-JP') : '不明')}</dd></dl></div>
+    ${bad ? `<p class="note">読み取れない記録が${bad}件ありました。それらは復元されません。</p>` : ''}
+    <p class="err" style="min-height:0;margin-top:14px"><b>いま入っている記録${realCount().toLocaleString('ja-JP')}件は、すべてこのバックアップの内容に置き換わります。</b></p>
+    <div class="sheet-foot"><div class="actions"><button type="button" class="btn" id="bNo">やめる</button><button type="button" class="btn danger solid primary" id="bYes">置き換えて復元</button></div></div>`, 'バックアップから復元');
+  sheet.querySelector('#bClose').onclick = sheet.querySelector('#bNo').onclick = closeSheet;
+  sheet.querySelector('#bYes').onclick = () => {
+    applyLoaded(months, {cats:obj.cats, pays:obj.pays, learn:obj.learn, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+    saveAll();
+    closeSheet(); toast(`${n.toLocaleString('ja-JP')}件を復元しました`); render();
+  };
+}
+
+/* ===== MoneyForward などのCSV取り込み ===== */
+async function handleCsvFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  const good = []; const bad = [];
+  for (const f of files) {
+    try {
+      const res = parseMoneyCsv(decodeText(await f.arrayBuffer()));
+      if (res.ok) good.push({name:f.name, res}); else bad.push(`${f.name}：${res.error}`);
+    } catch (e) { bad.push(`${f.name}：${e.message || '読み込めません'}`); }
+  }
+  if (!good.length) { openSheet(`<div class="sheet-head"><h2>取り込めませんでした</h2>${closeBtn('xClose')}</div>${bad.map(b => `<p class="err" style="min-height:0">${esc(b)}</p>`).join('')}<div class="sheet-foot"><div class="actions"><button type="button" class="btn primary" id="xOk">閉じる</button></div></div>`, '取り込みエラー'); $('#xClose').onclick = $('#xOk').onclick = closeSheet; return; }
+  openImportSheet(good, bad);
+}
+
+function openImportSheet(good, bad) {
+  const rows = good.flatMap(g => g.res.rows);
+  const own = good.every(g => g.res.own);
+  const imp = {rows, own, unit:'big', flip:false, exclCalc:true, exclXfer:true, catMap:{}, payMap:{},
+    errors: good.reduce((n,g) => n + g.res.errors, 0), zero: good.reduce((n,g) => n + g.res.zero, 0)};
+  const effT = r => (!own && imp.flip) ? (r.t === 'e' ? 'i' : 'e') : r.t;
+  const srcCat = r => own ? r.big : imp.unit === 'mid' ? (r.mid || r.big) : (effT(r) === 'i' && r.big === '収入' && r.mid ? r.mid : r.big);
+  const srcPay = r => r.pay || '';
+  const active = () => rows.filter(r => !(!own && ((imp.exclCalc && r.excl) || (imp.exclXfer && r.xfer))));
+  const catKey = (t, n) => `${t}|${n}`;
+
+  function groups() {
+    const cg = new Map(), pg = new Map();
+    for (const r of active()) {
+      const t = effT(r), k = catKey(t, srcCat(r));
+      const g = cg.get(k) || {t, name:srcCat(r), n:0, sum:0}; g.n++; g.sum += r.a; cg.set(k, g);
+      const pk = srcPay(r); const h = pg.get(pk) || {name:pk, n:0}; h.n++; pg.set(pk, h);
+    }
+    return {cg, pg};
+  }
+  function ensureMaps() {
+    const {cg, pg} = groups();
+    for (const [k, g] of cg) if (!(k in imp.catMap)) {
+      const ex = S.cats.find(c => c.type === g.t && c.name === g.name);
+      imp.catMap[k] = ex ? ex.id : 'new';
+    }
+    for (const [k, g] of pg) if (!(k in imp.payMap)) {
+      const ex = S.pays.find(p => p.name === g.name) || (g.name === '' ? S.pays.find(p => p.id === 'cash') : null);
+      imp.payMap[k] = ex ? ex.id : 'new';
+    }
+    return {cg, pg};
+  }
+  const catOptions = (t, name, sel) => {
+    const exists = S.cats.some(c => c.type === t && c.name === name);
+    return (exists ? '' : `<option value="new"${sel === 'new' ? ' selected' : ''}>新しく作る「${esc(name)}」</option>`)
+      + S.cats.filter(c => c.type === t).map(c => `<option value="${esc(c.id)}"${sel === c.id ? ' selected' : ''}>${esc(c.name)}</option>`).join('')
+      + `<option value="skip"${sel === 'skip' ? ' selected' : ''}>取り込まない</option>`;
+  };
+  const payOptions = (name, sel) => {
+    const exists = S.pays.some(p => p.name === name);
+    const label = name || '未設定';
+    return (exists ? '' : `<option value="new"${sel === 'new' ? ' selected' : ''}>新しく作る「${esc(label)}」</option>`)
+      + S.pays.map(p => `<option value="${esc(p.id)}"${sel === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
+  };
+  const countToImport = () => {
+    let n = 0;
+    for (const r of active()) { if (imp.catMap[catKey(effT(r), srcCat(r))] !== 'skip') n++; }
+    return n;
+  };
+  const sheet = openSheet('', 'CSVの取り込み');
+  sheetLocked = true;
+  function paint() {
+    const {cg, pg} = ensureMaps();
+    const act = active();
+    const inc = act.filter(r => effT(r) === 'i'), exp = act.filter(r => effT(r) === 'e');
+    const ds = act.map(r => r.d).sort();
+    const exclN = rows.length - act.length;
+    const mapRows = t => [...cg.entries()].filter(([, g]) => g.t === t).sort((a, b) => b[1].sum - a[1].sum).map(([k, g]) => `
+      <div class="map"><div class="src"><span>${esc(g.name)}</span><span>${g.n}件・${yen(g.sum)}</span></div>
+      <select data-k="${esc(k)}" aria-label="${esc(g.name)}の分類先">${catOptions(g.t, g.name, imp.catMap[k])}</select></div>`).join('');
+    const payRows = [...pg.entries()].sort((a, b) => b[1].n - a[1].n).map(([k, g]) => `
+      <div class="map"><div class="src"><span>${esc(g.name || '（未設定）')}</span><span>${g.n}件</span></div>
+      <select data-pk="${esc(k)}" aria-label="${esc(g.name || '未設定')}の支払方法">${payOptions(g.name, imp.payMap[k])}</select></div>`).join('');
+    const top = sheet.scrollTop;
+    sheet.innerHTML = `
+      <div class="sheet-head"><h2>CSVの取り込み</h2>${closeBtn('iClose')}</div>
+      <div class="card">
+        <div class="sumline"><span>${good.length}ファイル</span><span>期間 <b>${ds.length ? ds[0] + ' 〜 ' + ds[ds.length-1] : '-'}</b></span></div>
+        <div class="sumline"><span class="inc">収入 <b>${inc.length}件</b></span><span class="exp">支出 <b>${exp.length}件</b></span>${exclN ? `<span>除外 <b>${exclN}件</b></span>` : ''}${imp.errors ? `<span>読めない行 <b>${imp.errors}件</b></span>` : ''}</div>
+        ${bad.length ? bad.map(b => `<p class="note" style="margin-left:0;color:var(--expense)">${esc(b)}</p>`).join('') : ''}
+      </div>
+      ${own ? '<p class="note">このアプリで書き出したCSVです。同じ内容の記録は重複して取り込みません。</p>' : `
+      <div class="group-title">取り込み設定</div>
+      <label class="opt"><input type="checkbox" data-o="exclCalc" ${imp.exclCalc ? 'checked' : ''}>「計算対象」がオフの行を取り込まない</label>
+      <label class="opt"><input type="checkbox" data-o="exclXfer" ${imp.exclXfer ? 'checked' : ''}>振替（口座間の移動）を取り込まない</label>
+      <div class="field" style="margin-top:8px"><span class="flabel">分類の単位</span>
+        <div class="seg" role="group" aria-label="分類の単位"><button type="button" data-unit="big" aria-pressed="${imp.unit === 'big'}">大項目</button><button type="button" data-unit="mid" aria-pressed="${imp.unit === 'mid'}">中項目</button></div></div>
+      <label class="opt"><input type="checkbox" data-o="flip" ${imp.flip ? 'checked' : ''}>収入と支出が逆になっている（金額の符号を反転）</label>`}
+      <div class="group-title">支出の分類先（内容を確認して選べます）</div>
+      <div class="maps">${mapRows('e') || '<p class="note">支出はありません。</p>'}</div>
+      <div class="group-title">収入の分類先</div>
+      <div class="maps">${mapRows('i') || '<p class="note">収入はありません。</p>'}</div>
+      <div class="group-title">支払方法の割り当て${own ? '' : '（保有金融機関）'}</div>
+      <div class="maps">${payRows}</div>
+      <p class="note">「取り込まない」を選んだ分類は、その記録を読み込みません。すでに取り込み済みの記録（同じID）は自動で除きます。</p>
+      <div class="sheet-foot"><p class="err" id="iErr" style="min-height:0;margin:0 0 6px"></p><div class="actions"><button type="button" class="btn" id="iNo">やめる</button><button type="button" class="btn primary" id="iGo">取り込む（<span id="iCnt">${countToImport()}</span>件）</button></div></div>`;
+    sheet.scrollTop = top;
+  }
+  paint();
+  sheet.onclick = e => {
+    if (e.target.closest('#iClose, #iNo')) { closeSheet(); return; }
+    if (e.target.closest('#iGo')) { commitImport(); return; }
+    const u = e.target.closest('button[data-unit]');
+    if (u) { imp.unit = u.dataset.unit; imp.catMap = {}; paint(); }
+  };
+  sheet.onchange = e => {
+    const t = e.target;
+    if (t.dataset.o) { imp[t.dataset.o] = t.checked; if (t.dataset.o === 'flip') imp.catMap = {}; paint(); return; }
+    if (t.dataset.k) { imp.catMap[t.dataset.k] = t.value; const c = $('#iCnt'); if (c) c.textContent = countToImport(); return; }
+    if (t.dataset.pk !== undefined) { imp.payMap[t.dataset.pk] = t.value; }
+  };
+  function commitImport() {
+    const {cg, pg} = ensureMaps();
+    const created = {cats:[], pays:[]};
+    const catId = new Map(), payId = new Map();
+    for (const [k, g] of cg) {
+      const v = imp.catMap[k];
+      if (v === 'skip') { catId.set(k, null); continue; }
+      if (v === 'new') {
+        const c = {id:'c' + uid(), name:g.name, type:g.t, color:PAL[S.cats.length % PAL.length]};
+        S.cats.push(c); created.cats.push(c.id); catId.set(k, c.id);
+      } else catId.set(k, v);
+    }
+    for (const [k, g] of pg) {
+      const v = imp.payMap[k];
+      if (v === 'new') {
+        const p = {id:'p' + uid(), name:g.name || '未設定', color:PAL[(S.pays.length + 3) % PAL.length]};
+        S.pays.push(p); created.pays.push(p.id); payId.set(k, p.id);
+      } else payId.set(k, v);
+    }
+    const mfIds = new Set(), sigs = new Set();
+    for (const x of allTx()) { if (x.mf) mfIds.add(x.mf); sigs.add(`${x.d}|${x.t}|${x.a}|${x.n}`); }
+    const base = Date.now(); const txs = []; let dup = 0, skipped = 0;
+    for (const r of active()) {
+      const t = effT(r), cid = catId.get(catKey(t, srcCat(r)));
+      if (!cid) { skipped++; continue; }
+      if (r.id ? mfIds.has(r.id) : sigs.has(`${r.d}|${t}|${r.a}|${r.n}`)) { dup++; continue; }
+      const tx = {id:uid(), d:r.d, t, c:cid, a:r.a, p:payId.get(srcPay(r)) || '', n:r.n, s:base + txs.length};
+      if (r.id) tx.mf = r.id;
+      txs.push(tx);
+    }
+    if (!txs.length && !created.cats.length && !created.pays.length) { $('#iErr').textContent = dup ? `新しく取り込める記録はありません（重複${dup}件）。` : '取り込める記録がありません。'; return; }
+    const batch = addBatch(txs, created);
+    if (txs.length) {
+      const ms = [...new Set(txs.map(x => x.d.slice(0,7)))].sort();
+      const cm = curMonth();
+      ui.month = ms.filter(m => m <= cm).pop() || ms[ms.length - 1];
+    }
+    ui.tab = 'home'; ui.filter = 'all'; ui.q = ''; $('#q').value = '';
+    closeSheet();
+    render();
+    toast(`${txs.length.toLocaleString('ja-JP')}件を取り込みました${dup ? `（重複${dup}件は除外）` : ''}`, {action:'取り消す', fn:() => undoBatch(batch), ms:10000});
+  }
+}
+/* ===== レシート読み取り（この端末の中で文字認識） ===== */
+function simdSupported() {
+  try { return WebAssembly.validate(new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11])); }
+  catch (e) { return false; }
+}
+function loadImage(file) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); res(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('画像を開けません。JPEGやPNGの画像を選んでください')); };
+    img.src = url;
+  });
+}
+/* 白黒にして、影や照明のムラをならす。文字認識の精度を上げるための下処理 */
+async function preprocessImage(file, mode) {
+  mode = mode || 'gray';
+  const img = await loadImage(file);
+  const w0 = img.naturalWidth, h0 = img.naturalHeight;
+  if (!w0 || !h0) throw new Error('画像を開けません');
+  let scale = 1;
+  const maxSide = Math.max(w0, h0), minSide = Math.min(w0, h0);
+  if (maxSide > 3000) scale = 3000 / maxSide;
+  if (w0 * h0 * scale * scale > 6e6) scale = Math.sqrt(6e6 / (w0 * h0));
+  if (minSide * scale < 700) scale = Math.min(2, 700 / minSide);
+  const w = Math.max(1, Math.round(w0 * scale)), h = Math.max(1, Math.round(h0 * scale));
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d', {willReadFrequently: true});
+  ctx.imageSmoothingQuality = 'high';
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(img, 0, 0, w, h);
+  // 背景（照明のムラ）を縮小→拡大でぼかして推定
+  const sw = Math.max(2, Math.round(w / 32)), sh = Math.max(2, Math.round(h / 32));
+  const small = document.createElement('canvas'); small.width = sw; small.height = sh;
+  const sctx = small.getContext('2d'); sctx.imageSmoothingQuality = 'high'; sctx.drawImage(cv, 0, 0, sw, sh);
+  const bgc = document.createElement('canvas'); bgc.width = w; bgc.height = h;
+  const bctx = bgc.getContext('2d', {willReadFrequently: true}); bctx.imageSmoothingEnabled = true; bctx.imageSmoothingQuality = 'high';
+  bctx.drawImage(small, 0, 0, w, h);
+  if (mode !== 'none') {
+    const src = ctx.getImageData(0, 0, w, h), bg = bctx.getImageData(0, 0, w, h);
+    const a = src.data, b = bg.data;
+    if (mode === 'gray') {
+      const hist = new Uint32Array(256);
+      for (let i = 0; i < a.length; i += 4) hist[Math.round(0.299 * a[i] + 0.587 * a[i+1] + 0.114 * a[i+2])]++;
+      const tot = w * h; let acc = 0, lo = 0, hi = 255;
+      for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= tot * 0.01) { lo = v; break; } }
+      acc = 0;
+      for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= tot * 0.3) { hi = v; break; } }
+      const span = Math.max(30, hi - lo);
+      for (let i = 0; i < a.length; i += 4) {
+        let v = ((0.299 * a[i] + 0.587 * a[i+1] + 0.114 * a[i+2]) - lo) / span * 255;
+        v = v > 255 ? 255 : v < 0 ? 0 : v;
+        a[i] = a[i+1] = a[i+2] = v; a[i+3] = 255;
+      }
+    } else {
+      for (let i = 0; i < a.length; i += 4) {
+        const l = 0.299 * a[i] + 0.587 * a[i+1] + 0.114 * a[i+2];
+        const bl = Math.max(40, 0.299 * b[i] + 0.587 * b[i+1] + 0.114 * b[i+2]);
+        let v = l / bl * 238;
+        v = v > 255 ? 255 : v < 0 ? 0 : v;
+        a[i] = a[i+1] = a[i+2] = v; a[i+3] = 255;
+      }
+    }
+    ctx.putImageData(src, 0, 0);
+  }
+  const blob = await new Promise(res => cv.toBlob(res, 'image/png'));
+  if (!blob) throw new Error('画像を処理できません');
+  return await blob.arrayBuffer();
+}
+function runOcr(png, state, setMsg) {
+  return (async () => {
+    const corePath = new URL(`vendor/core/tesseract-core-${simdSupported() ? 'simd-' : ''}lstm.wasm.js`, location.href).href;
+    setMsg('日本語データを読み込んでいます（初回のみ約14MB）…', null);
+    const res = await fetch('vendor/lang/jpn.traineddata');
+    if (!res.ok) throw new Error('日本語データを読み込めません');
+    const lang = await res.arrayBuffer();
+    if (state.cancelled) return null;
+    setMsg('文字認識エンジンを起動しています…', null);
+    const w = new Worker('ocr-worker.js');
+    state.worker = w;
+    await new Promise((ok, ng) => {
+      w.onmessage = e => { if (e.data.type === 'ready') ok(); else if (e.data.type === 'error') ng(new Error(e.data.message)); };
+      w.onerror = () => ng(new Error('文字認識を開始できません'));
+      w.postMessage({type:'init', corePath, lang, psm:6}, [lang]);
+    });
+    if (state.cancelled) return null;
+    setMsg('文字を読み取っています…', 0);
+    const text = await new Promise((ok, ng) => {
+      w.onmessage = e => {
+        const m = e.data;
+        if (m.type === 'progress') setMsg('文字を読み取っています…', m.value);
+        else if (m.type === 'result') ok(m.text);
+        else if (m.type === 'error') ng(new Error(m.message));
+      };
+      w.onerror = () => ng(new Error('文字の読み取りに失敗しました'));
+      w.postMessage({type:'recognize', image:png}, [png]);
+    });
+    try { w.terminate(); } catch (e) {}
+    state.worker = null;
+    return text;
+  })();
+}
+
+async function handleReceiptFile(file) {
+  if (!file) return;
+  const state = {cancelled:false, worker:null};
+  const thumb = URL.createObjectURL(file);
+  let handedOver = false;
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>レシートを読み取り中</h2>${closeBtn('rClose')}</div>
+    <img class="thumb" src="${thumb}" alt="選んだレシート">
+    <div class="progress indet" id="rProg"><i></i></div>
+    <p class="muted" id="rMsg" style="margin:0 0 16px">画像を準備しています…</p>
+    <div class="sheet-foot"><div class="actions"><button type="button" class="btn" id="rCancel">やめる</button></div></div>`,
+    'レシートの読み取り', () => {
+      state.cancelled = true;
+      if (state.worker) { try { state.worker.terminate(); } catch (e) {} }
+      if (!handedOver) URL.revokeObjectURL(thumb);
+    });
+  sheetLocked = true;
+  sheet.querySelector('#rClose').onclick = sheet.querySelector('#rCancel').onclick = closeSheet;
+  const setMsg = (t, p) => {
+    const m = $('#rMsg'), pr = $('#rProg');
+    if (!m || !pr) return;
+    m.textContent = t;
+    if (p == null) { pr.classList.add('indet'); pr.firstElementChild.style.width = ''; }
+    else { pr.classList.remove('indet'); pr.firstElementChild.style.width = Math.round(p * 100) + '%'; }
+  };
+  try {
+    const png = await preprocessImage(file);
+    if (state.cancelled) return;
+    const text = await runOcr(png, state, setMsg);
+    if (state.cancelled || text === null) return;
+    handedOver = true;
+    openReceiptReview(parseReceipt(text), text, thumb);
+  } catch (e) {
+    if (state.cancelled) return;
+    const s = $('#sheet');
+    s.innerHTML = `
+      <div class="sheet-head"><h2>読み取れませんでした</h2>${closeBtn('rClose')}</div>
+      <p class="err" style="min-height:0">${esc(e.message || '読み取りに失敗しました')}</p>
+      <p class="note" style="margin-left:0">明るい場所で、レシート全体が画面いっぱいに入るように撮り直すと読み取りやすくなります。</p>
+      <div class="sheet-foot"><div class="actions"><button type="button" class="btn" id="rManual">手入力で続ける</button><button type="button" class="btn primary" id="rOk">閉じる</button></div></div>`;
+    s.querySelector('#rClose').onclick = s.querySelector('#rOk').onclick = closeSheet;
+    s.querySelector('#rManual').onclick = () => { handedOver = true; openReceiptReview({date:null, store:'', items:[], total:null, pay:null}, '', thumb); };
+  }
+}
+
+/* ===== 反映前の確認画面（分類は自分で決める） ===== */
+function openReceiptReview(info, rawText, thumb) {
+  const expCats = S.cats.filter(c => c.type === 'e');
+  const R = {
+    id: uid(), date: info.date || todayStr(), store: info.store || '', pay: (info.pay && S.pays.some(p => p.id === info.pay)) ? info.pay : (S.pays.some(p => p.id === ui.lastPay) ? ui.lastPay : (S.pays[0] ? S.pays[0].id : '')),
+    mode: info.items.length ? 'items' : 'single', learn: true, total: info.total, readN: info.items.length,
+    items: info.items.map(it => { const s = suggestCat(it.label, info.store); return {label:it.label, amt:it.amount, neg:it.neg, cat:s ? s.c : '', sug:!!s, inc:true}; }),
+    singleCat: '', singleSug: false, singleAmt: 0
+  };
+  const sum = () => R.items.reduce((s, it) => s + (it.inc ? (it.neg ? -it.amt : it.amt) : 0), 0);
+  // 合計1件で登録するときの初期値
+  const bySum = {};
+  for (const it of R.items) if (it.cat) bySum[it.cat] = (bySum[it.cat] || 0) + it.amt;
+  const top = Object.entries(bySum).sort((a, b) => b[1] - a[1])[0];
+  R.singleCat = top ? top[0] : (storeHint(R.store) || '');
+  R.singleSug = !!R.singleCat;
+  R.singleAmt = R.total || Math.max(0, sum());
+
+  const catOpts = sel => `<option value="">分類を選ぶ</option>` + expCats.map(c => `<option value="${esc(c.id)}"${c.id === sel ? ' selected' : ''}>${esc(c.name)}</option>`).join('');
+  const itemHtml = (it, i) => `
+    <div class="item${it.inc ? '' : ' off'}${it.inc && !it.cat ? ' need' : ''}" data-i="${i}">
+      <div class="item-top">
+        <input type="checkbox" data-f="inc" ${it.inc ? 'checked' : ''} aria-label="この行を登録する">
+        <input type="text" data-f="label" value="${esc(it.label)}" maxlength="40" placeholder="品名" aria-label="品名">
+        <button type="button" class="icon-btn sm" data-act="r-del" aria-label="この行を削除">${XICON}</button>
+      </div>
+      <div class="item-bot">
+        <label class="amtbox"><span>${it.neg ? '−¥' : '¥'}</span><input type="text" inputmode="numeric" data-f="amt" value="${it.amt || ''}" placeholder="0" aria-label="金額"></label>
+        <button type="button" class="chip small" data-act="r-sign" aria-pressed="${it.neg}">値引き</button>
+        <select data-f="cat" aria-label="分類">${catOpts(it.cat)}</select>
+      </div>
+      <div class="item-note">${it.inc && it.sug && it.cat ? '<span class="tag">候補</span>自動で付けた分類です' : ''}</div>
+    </div>`;
+
+  const sheet = openSheet('', 'レシートの確認', () => URL.revokeObjectURL(thumb));
+  sheetLocked = true;
+  function paintAll() {
+    sheet.innerHTML = `
+      <div class="sheet-head"><h2>レシートの内容を確認</h2>${closeBtn('vClose')}</div>
+      ${R.readN ? '' : `<div class="banner warn"><div><b>明細を読み取れませんでした。</b>「行を追加」で明細を入力するか、「合計1件で登録」を使ってください。</div></div>`}
+      <div><button type="button" class="chip small" data-act="r-img" aria-expanded="false">レシート画像を見る</button><img class="thumb" id="rImg" src="${thumb}" alt="レシート" hidden style="margin-top:10px"></div>
+      <label class="field"><span class="flabel">日付</span><input id="rDate" type="date" value="${esc(R.date)}"></label>
+      <label class="field"><span class="flabel">店名</span><input id="rStore" type="text" maxlength="24" value="${esc(R.store)}" placeholder="例：スーパーみらい" autocomplete="off"></label>
+      <div class="field"><span class="flabel">支払方法</span><div class="chips" id="rPays">${payChips(R.pay)}</div></div>
+      <div class="field"><div class="seg" id="rMode" role="group" aria-label="登録のしかた">
+        <button type="button" data-m="items" aria-pressed="${R.mode === 'items'}">明細ごとに登録</button>
+        <button type="button" data-m="single" aria-pressed="${R.mode === 'single'}">合計1件で登録</button></div></div>
+      <div id="rBody"></div>
+      ${rawText ? `<details class="raw"><summary>読み取った文字を見る</summary><pre>${esc(rawText.replace(/\n{2,}/g, '\n'))}</pre></details>` : ''}
+      <div class="sheet-foot"><p class="err" id="rErr" role="alert" style="min-height:0;margin:0 0 6px"></p>
+        <div class="actions"><button type="button" class="btn" id="rNo">やめる</button><button type="button" class="btn primary" id="rGo">登録する</button></div></div>`;
+    paintBody();
+  }
+  function paintBody() {
+    const body = $('#rBody');
+    if (R.mode === 'items') {
+      const sugN = R.items.filter(it => it.inc && it.sug && it.cat).length;
+      body.innerHTML = `
+        <div class="group-title">明細（${R.items.length}行）</div>
+        ${sugN ? `<div class="banner warn" style="margin-top:6px"><div>分類の候補を自動で付けています。<b>「候補」と出ている行は、内容を確認してから登録してください。</b>変更すると候補の表示は消えます。</div></div>` : ''}
+        <div class="maps" id="rItems">${R.items.map(itemHtml).join('') || '<p class="note">明細がありません。</p>'}</div>
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+          <button type="button" class="chip" data-act="r-add">＋ 行を追加</button>
+          <select id="rBulk" aria-label="すべての行の分類をまとめて設定" style="flex:1 1 180px;min-height:40px;padding-top:6px;padding-bottom:6px">
+            <option value="">すべての行の分類を一括設定…</option>${expCats.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select>
+        </div>
+        <div class="totals" id="rTotals"></div>
+        <label class="opt" style="margin-top:6px"><input type="checkbox" id="rLearn" ${R.learn ? 'checked' : ''}>この分類を覚えて、次回から候補にする</label>`;
+    } else {
+      body.innerHTML = `
+        <label class="field"><span class="flabel">金額</span><span class="amount"><b>¥</b><input id="rSAmt" type="text" inputmode="numeric" value="${R.singleAmt ? R.singleAmt.toLocaleString('ja-JP') : ''}" placeholder="0" aria-label="合計金額"></span></label>
+        <div class="field"><span class="flabel">分類</span><select id="rSCat" aria-label="分類">${catOpts(R.singleCat)}</select>
+          <div class="item-note" id="rSNote" style="margin-top:6px">${R.singleSug && R.singleCat ? '<span class="tag">候補</span>自動で付けた分類です' : ''}</div></div>
+        ${R.total ? `<p class="note" style="margin-left:0">レシートから読み取った合計：${yen(R.total)}</p>` : ''}`;
+    }
+    refresh();
+  }
+  function refresh() {
+    const go = $('#rGo'); if (!go) return;
+    const err = validate(true);
+    if (R.mode === 'items') {
+      const inc = R.items.filter(it => it.inc), s = sum();
+      const t = $('#rTotals');
+      if (t) {
+        const diff = R.total != null ? R.total - s : null;
+        t.innerHTML = `<div><span>登録する明細の合計（${inc.length}行）</span><b class="num">${s < 0 ? '−' : ''}${yen(s)}</b></div>`
+          + (R.total != null ? `<div><span>レシートの合計</span><b class="num">${yen(R.total)}</b></div>` : '<div><span>レシートの合計</span><span class="muted">読み取れませんでした</span></div>')
+          + (diff ? `<div class="diff"><span>差額</span><b class="num">${diff < 0 ? '−' : '+'}${yen(diff)}</b></div>` : '')
+          + (diff ? `<div class="muted" style="display:block;font-size:12.5px">読み取り漏れ、外税の消費税、値引きなどが原因のことがあります。${diff > 0 && diff <= (R.total || 0) * 0.25 ? '<br><button type="button" class="chip small" data-act="r-adj" style="margin-top:6px">差額を「消費税・調整」の行として追加</button>' : ''}</div>` : '');
+      }
+      go.textContent = `登録する（${inc.length}件・${s < 0 ? '−' : ''}${yen(s)}）`;
+    } else {
+      go.textContent = `登録する（1件・${yen(R.singleAmt || 0)}）`;
+    }
+    go.disabled = !!err;
+    const e = $('#rErr'); if (e) e.textContent = err ? err : '';
+  }
+  function validate() {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(R.date)) return '日付を入力してください。';
+    if (R.mode === 'single') {
+      if (!(R.singleAmt > 0)) return '金額を入力してください。';
+      if (!R.singleCat) return '分類を選んでください。';
+      return '';
+    }
+    const inc = R.items.filter(it => it.inc);
+    if (!inc.length) return '登録する行がありません。';
+    if (inc.some(it => !(it.amt > 0))) return '金額が空の行があります。';
+    const need = inc.filter(it => !it.cat).length;
+    if (need) return `分類が未選択の行が${need}件あります。`;
+    return '';
+  }
+  function repaintItem(i) {
+    const el = sheet.querySelector(`.item[data-i="${i}"]`);
+    if (el) el.outerHTML = itemHtml(R.items[i], i);
+  }
+  const fixSugBanner = () => {
+    // 候補が残っていない場合は説明バナーを消す
+    if (R.mode !== 'items') return;
+    const left = R.items.filter(it => it.inc && it.sug && it.cat).length;
+    const b = sheet.querySelector('#rBody .banner.warn');
+    if (b && !left) b.remove();
+  };
+  function build() {
+    const base = Date.now(), pay = R.pay, store = R.store.trim();
+    if (R.mode === 'single') {
+      return [{id:uid(), d:R.date, t:'e', c:R.singleCat, a:Math.round(R.singleAmt), p:pay, n:(store || 'レシート').slice(0,80), s:base, r:R.id}];
+    }
+    return R.items.filter(it => it.inc).map((it, i) => ({id:uid(), d:R.date, t:'e', c:it.cat, a:(it.neg ? -1 : 1) * Math.round(it.amt), p:pay,
+      n:[store, it.label.trim()].filter(Boolean).join(' ').slice(0,80), s:base + i, r:R.id}));
+  }
+  paintAll();
+
+  sheet.onclick = e => {
+    const t = e.target;
+    if (t.closest('#vClose, #rNo')) { closeSheet(); return; }
+    if (t.closest('#rGo')) {
+      const err = validate(); if (err) { $('#rErr').textContent = err; return; }
+      const txs = build();
+      if (R.mode === 'items' && R.learn) { for (const it of R.items) if (it.inc && it.cat) learnLabel(it.label, it.cat); saveMeta(); }
+      const batch = addBatch(txs);
+      ui.lastPay = R.pay;
+      ui.month = R.date.slice(0,7); ui.tab = 'home'; ui.filter = 'all'; ui.q = ''; $('#q').value = '';
+      closeSheet(); render();
+      toast(`${txs.length}件を登録しました`, {action:'取り消す', fn:() => undoBatch(batch), ms:9000});
+      return;
+    }
+    const pb = t.closest('#rPays button[data-p]');
+    if (pb) { R.pay = pb.dataset.p; $('#rPays').innerHTML = payChips(R.pay); return; }
+    const mb = t.closest('#rMode button[data-m]');
+    if (mb) { R.mode = mb.dataset.m; sheet.querySelectorAll('#rMode button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.m === R.mode))); paintBody(); return; }
+    const act = t.closest('[data-act]');
+    if (!act) return;
+    const row = t.closest('.item'), i = row ? Number(row.dataset.i) : -1;
+    switch (act.dataset.act) {
+      case 'r-img': { const im = $('#rImg'); im.hidden = !im.hidden; act.setAttribute('aria-expanded', String(!im.hidden)); act.textContent = im.hidden ? 'レシート画像を見る' : 'レシート画像を隠す'; break; }
+      case 'r-del': R.items.splice(i, 1); paintBody(); break;
+      case 'r-sign': R.items[i].neg = !R.items[i].neg; repaintItem(i); refresh(); break;
+      case 'r-add': { R.items.push({label:'', amt:0, neg:false, cat:'', sug:false, inc:true}); paintBody(); const l = sheet.querySelector(`.item[data-i="${R.items.length - 1}"] input[data-f="label"]`); if (l) l.focus(); break; }
+      case 'r-adj': {
+        const diff = R.total - sum();
+        const cnt = {}; R.items.forEach(it => { if (it.inc && it.cat) cnt[it.cat] = (cnt[it.cat] || 0) + 1; });
+        const common = Object.entries(cnt).sort((a, b) => b[1] - a[1])[0];
+        R.items.push({label:'消費税・調整', amt:diff, neg:false, cat:common ? common[0] : '', sug:false, inc:true});
+        paintBody(); break;
+      }
+    }
+  };
+  sheet.oninput = e => {
+    const t = e.target, row = t.closest('.item'), i = row ? Number(row.dataset.i) : -1;
+    if (t.id === 'rStore') { R.store = t.value; return; }
+    if (t.id === 'rSAmt') { const v = parseInt(normDigits(t.value).replace(/\D/g, '') || '0', 10); R.singleAmt = v; refresh(); return; }
+    if (i < 0) return;
+    if (t.dataset.f === 'label') R.items[i].label = t.value;
+    else if (t.dataset.f === 'amt') {
+      const digits = normDigits(t.value).replace(/\D/g, '').slice(0, 7);
+      if (t.value !== digits) t.value = digits;
+      R.items[i].amt = digits ? parseInt(digits, 10) : 0;
+      refresh();
+    }
+  };
+  sheet.onchange = e => {
+    const t = e.target, row = t.closest('.item'), i = row ? Number(row.dataset.i) : -1;
+    if (t.id === 'rDate') { R.date = t.value; refresh(); return; }
+    if (t.id === 'rLearn') { R.learn = t.checked; return; }
+    if (t.id === 'rSCat') { R.singleCat = t.value; R.singleSug = false; const n = $('#rSNote'); if (n) n.innerHTML = ''; refresh(); return; }
+    if (t.id === 'rBulk') {
+      if (!t.value) return;
+      R.items.forEach(it => { if (it.inc) { it.cat = t.value; it.sug = false; } });
+      paintBody(); return;
+    }
+    if (i < 0) return;
+    const it = R.items[i];
+    if (t.dataset.f === 'cat') { it.cat = t.value; it.sug = false; repaintItem(i); fixSugBanner(); refresh(); }
+    else if (t.dataset.f === 'inc') { it.inc = t.checked; repaintItem(i); fixSugBanner(); refresh(); }
+  };
+}
+/* ===== Googleスプレッドシートとの同期（任意機能） =====
+   端末の記録が本体。シートは「自動の控え」で、シート側で直した内容も取り込める。
+   同じ記録を両方で変えたときは、更新日時が新しい方を採用する。 */
+const SYNC_URL_RE = /^https:\/\/script\.google\.com\/[^\s?#]+\/exec$/;
+const SYNC_DELAY = 5000;
+let syncBusy = false, syncDirty = false, syncTimer = null, syncErr = '', syncNote = '';
+
+const syncOn = () => !!(S.sync && S.sync.url && S.sync.key);
+
+function scheduleSync() {
+  if (!syncOn() || !S.sync.auto) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => { if (navigator.onLine !== false) syncNow({silent:true}); }, SYNC_DELAY);
+}
+
+async function gasCall(url, body, ms = 60000) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  let res, text;
+  try {
+    // text/plain にすると事前確認(プリフライト)が不要になり、GASで受け取れる
+    res = await fetch(url, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body:JSON.stringify(body), redirect:'follow', signal:ctl.signal});
+    text = await res.text();
+  } catch (e) {
+    throw new Error(e && e.name === 'AbortError' ? '時間内に応答がありませんでした。電波の良い所でもう一度お試しください。' : '接続できませんでした。電波、URL、公開設定（アクセスできるユーザー：全員）を確認してください。');
+  } finally { clearTimeout(timer); }
+  let j;
+  try { j = JSON.parse(text); } catch (e) {
+    throw new Error('GASから想定外の応答でした。デプロイの「アクセスできるユーザー」が「全員」か、URLが「/exec」で終わるか確認してください。');
+  }
+  if (!j.ok) {
+    const m = {auth:'合言葉が一致しません。アプリとGASのKEYを同じにしてください。', 'key-not-set':'GASのKEYがまだ初期値のままです。書き換えて、デプロイし直してください。', 'bad-request':'要求を読み取れませんでした。', server:'GAS側でエラーが出ました。' + (j.detail ? '（' + j.detail + '）' : '')};
+    throw new Error(m[j.error] || ('GASがエラーを返しました：' + j.error));
+  }
+  return j;
+}
+
+const txToWire = x => ({id:x.id, d:x.d, t:x.t, c:x.c, cn:catById(x.c).name, a:x.a, p:x.p, pn:x.p ? payName(x.p) : '', n:x.n || '', u:x.u || 0, x:0});
+
+/* シートの分類名・支払方法名 → このアプリのID（なければ新しく作る） */
+function resolveCat(name, id, type, created) {
+  let c = S.cats.find(c => c.name === name && c.type === type);
+  if (c) return c.id;
+  if (!name) { const f = S.cats.find(c => c.id === id); return f ? f.id : (type === 'i' ? 'other_i' : 'other_e'); }
+  c = {id:'c' + uid(), name, type, color:PAL[S.cats.length % PAL.length]};
+  S.cats.push(c); created.cats++;
+  return c.id;
+}
+function resolvePay(name, id, created) {
+  if (!name) return '';
+  let p = S.pays.find(p => p.name === name);
+  if (p) return p.id;
+  p = {id:'p' + uid(), name, color:PAL[(S.pays.length + 3) % PAL.length]};
+  S.pays.push(p); created.pays++;
+  return p.id;
+}
+
+function putTx(tx) {
+  const k = tx.d.slice(0,7);
+  (S.months[k] = S.months[k] || []).push(tx);
+}
+function dropTx(id) {
+  for (const k of Object.keys(S.months)) {
+    const i = S.months[k].findIndex(x => x.id === id);
+    if (i >= 0) { const [x] = S.months[k].splice(i, 1); if (!S.months[k].length) delete S.months[k]; return x; }
+  }
+  return null;
+}
+
+function mergeFromSheet(res, wasEmpty) {
+  const st = {add:0, upd:0, del:0, cats:0, pays:0};
+  const created = {cats:0, pays:0};
+  // 新しい端末（記録なし）は、シートの分類・支払方法をそのまま使う
+  if (wasEmpty && res.settings && res.settings.cats.length) {
+    S.cats = res.settings.cats.map(c => ({id:c.id || ('c' + uid()), name:c.name, type:c.type, color:c.color || '#8A8F98'}));
+    if (res.settings.pays.length) S.pays = res.settings.pays.map(p => ({id:p.id || ('p' + uid()), name:p.name, color:p.color || '#8A8F98'}));
+  }
+  const touched = new Set();
+  for (const r of res.rows) {
+    const tomb = S.dels[r.id] || 0;
+    const local = findTx(r.id);
+    if (r.x) {
+      if (local && r.u > (local.u || 0)) { dropTx(r.id); touched.add(local.d.slice(0,7)); st.del++; }
+      continue;
+    }
+    if (tomb && tomb >= r.u) continue;                    // 端末で消した後に、古い内容が残っていた場合
+    if (local && (local.u || 0) >= r.u) continue;          // 端末の方が新しい（または同じ）
+    const t = r.t === 'i' ? 'i' : 'e';
+    const tx = cleanTx({id:r.id, d:r.d, t, c:resolveCat(r.cn, r.c, t, created), a:r.a, p:resolvePay(r.pn, r.p, created), n:r.n, s:local ? local.s : Date.now(), u:r.u});
+    if (!tx) continue;
+    if (local) { dropTx(r.id); touched.add(local.d.slice(0,7)); st.upd++; if (local.mf) tx.mf = local.mf; if (local.r) tx.r = local.r; } else st.add++;
+    putTx(tx); touched.add(tx.d.slice(0,7));
+    delete S.dels[r.id];
+  }
+  st.cats = created.cats; st.pays = created.pays;
+  return {st, touched};
+}
+
+async function syncNow(opt = {}) {
+  if (!syncOn()) return false;
+  if (syncBusy) { syncDirty = true; return false; }
+  syncBusy = true; syncDirty = false;
+  clearTimeout(syncTimer);
+  if (!opt.silent) { syncNote = '同期中…'; if (ui.tab === 'set') renderSettings(); }
+  const sent = Object.assign({}, S.dels);
+  try {
+    const wasEmpty = realCount() === 0 && !S.sync.last;
+    const tx = allTx().map(txToWire);
+    for (const id of Object.keys(sent)) tx.push({id, d:'2000-01-01', t:'e', c:'', cn:'', a:1, p:'', pn:'', n:'', u:sent[id], x:1});
+    const res = await gasCall(S.sync.url, {key:S.sync.key, op:'sync', tx, settings: wasEmpty ? null : {cats:S.cats, pays:S.pays}});
+    const {st, touched} = mergeFromSheet(res, wasEmpty);
+    for (const id of Object.keys(sent)) if (S.dels[id] === sent[id]) delete S.dels[id];
+    S.sync.last = Date.now();
+    syncErr = '';
+    const changed = st.add + st.upd + st.del + st.cats + st.pays;
+    syncNote = changed ? `シートから 追加${st.add}・更新${st.upd}・削除${st.del} を反映しました` : '';
+    if (changed) { await saveAll(); } else { await saveMeta(); }
+    syncBusy = false;
+    render();
+    if (!opt.silent) toast(changed ? syncNote : '同期しました（変更なし）');
+    return true;
+  } catch (e) {
+    syncErr = e.message || '同期できませんでした';
+    syncNote = '';
+    syncBusy = false;
+    if (!opt.silent) toast('同期できませんでした');
+    if (ui.tab === 'set') renderSettings();
+    return false;
+  } finally {
+    syncBusy = false;
+    if (syncDirty) scheduleSync();
+  }
+}
+
+/* ===== 設定画面の部品 ===== */
+function syncCardHtml() {
+  if (!syncOn()) {
+    return `<div class="card"><p class="sub-title">Googleスプレッドシート</p>
+      <p class="note" style="margin:0 0 12px">記録の控えを自分のスプレッドシートに自動で残せます。シート側で直した内容も取り込めます。</p>
+      <button type="button" class="btn" data-act="sync-setup" style="width:100%">連携を設定する</button></div>`;
+  }
+  const last = S.sync.last ? new Date(S.sync.last).toLocaleString('ja-JP') : 'まだありません';
+  return `<div class="card"><p class="sub-title">Googleスプレッドシート</p>
+    <dl class="kv"><dt>状態</dt><dd>${syncBusy ? '同期中…' : syncErr ? '失敗' : '連携中'}</dd><dt>最後の同期</dt><dd>${esc(last)}</dd><dt>自動同期</dt><dd>${S.sync.auto ? 'オン' : 'オフ'}</dd></dl>
+    ${syncErr ? `<p class="err" style="min-height:0;margin:10px 0 0">${esc(syncErr)}</p>` : ''}
+    ${syncNote && !syncErr ? `<p class="note" style="margin-left:0">${esc(syncNote)}</p>` : ''}
+    <div class="stack" style="margin-top:12px"><button type="button" class="btn primary" data-act="sync-now">今すぐ同期</button><button type="button" class="btn" data-act="sync-setup">設定を変える</button></div></div>`;
+}
+
+function openSyncSheet() {
+  const cur = S.sync || {};
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>スプレッドシート連携</h2>${closeBtn('yClose')}</div>
+    <label class="field"><span class="flabel">ウェブアプリのURL</span><input type="text" id="yUrl" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(cur.url || '')}"></label>
+    <label class="field"><span class="flabel">合言葉（GASのKEYと同じもの）</span><input type="text" id="yKey" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" value="${esc(cur.key || '')}"></label>
+    <label class="opt"><input type="checkbox" id="yAuto" ${cur.auto === false ? '' : 'checked'}><span>記録を変えたら自動で同期する</span></label>
+    <p class="note" style="margin-left:0">URLと合言葉はこの端末の中だけに保存され、バックアップファイルには含まれません。</p>
+    <p class="err" id="yErr" style="min-height:20px"></p>
+    <div class="sheet-foot"><div class="actions">${syncOn() ? '<button type="button" class="btn danger" id="yOff">連携を解除</button>' : '<button type="button" class="btn" id="yNo">やめる</button>'}<button type="button" class="btn primary" id="yOk">接続を確かめて保存</button></div></div>`, 'スプレッドシート連携');
+  const err = m => { sheet.querySelector('#yErr').textContent = m; };
+  sheet.querySelector('#yClose').onclick = closeSheet;
+  const no = sheet.querySelector('#yNo'); if (no) no.onclick = closeSheet;
+  const off = sheet.querySelector('#yOff');
+  if (off) off.onclick = () => {
+    S.sync = {url:'', key:'', auto:true, last:null}; S.dels = {}; syncErr = ''; syncNote = '';
+    saveMeta(); closeSheet(); toast('連携を解除しました（シートのデータは残ります）'); render();
+  };
+  sheet.querySelector('#yOk').onclick = async () => {
+    const url = sheet.querySelector('#yUrl').value.trim().replace(/\s+/g, '');
+    const key = sheet.querySelector('#yKey').value.trim();
+    if (!SYNC_URL_RE.test(url)) { err(/\/dev$/.test(url) ? 'URLが「/dev」で終わっています。デプロイ後の「/exec」で終わるURLを入れてください。' : 'URLは「https://script.google.com/…/exec」の形です。'); return; }
+    if (key.length < 8) { err('合言葉は8文字以上にしてください。'); return; }
+    const btn = sheet.querySelector('#yOk'); btn.disabled = true; btn.textContent = '確認中…'; err('');
+    try {
+      await gasCall(url, {key, op:'ping'}, 30000);
+    } catch (e) { err(e.message); btn.disabled = false; btn.textContent = '接続を確かめて保存'; return; }
+    const changedTarget = url !== cur.url;
+    S.sync = {url, key, auto:sheet.querySelector('#yAuto').checked, last: changedTarget ? null : cur.last || null};
+    await saveMeta();
+    closeSheet(); render();
+    await syncNow();
+  };
+}
+/* ===== イベント ===== */
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-act]');
+  if (!el) return;
+  const v = el.dataset.v;
+  switch (el.dataset.act) {
+    case 'prev': ui.month = shiftMonth(ui.month, -1); render(); break;
+    case 'next': ui.month = shiftMonth(ui.month, 1); render(); break;
+    case 'today': ui.month = curMonth(); render(); break;
+    case 'goto': ui.month = el.dataset.m; render(); break;
+    case 'tab': ui.tab = el.dataset.tab; render(); window.scrollTo(0, 0); break;
+    case 'add': openTxSheet(null); break;
+    case 'edit': { const tx = findTx(el.dataset.id); if (tx) openTxSheet(tx); break; }
+    case 'filter': ui.filter = v; renderFilter(); renderList(); break;
+    case 'atype': ui.aType = v; renderStats(); break;
+    case 'aby': ui.aBy = v; renderStats(); break;
+    case 'settype': ui.setType = v; renderSettings(); break;
+    case 'editcat': { const c = S.cats.find(x => x.id === el.dataset.id); if (c) openNameSheet('cat', c); break; }
+    case 'addcat': openNameSheet('cat', null, ui.setType); break;
+    case 'editpay': { const p = S.pays.find(x => x.id === el.dataset.id); if (p) openNameSheet('pay', p); break; }
+    case 'addpay': openNameSheet('pay', null); break;
+    case 'receipt': $('#fileReceipt').click(); break;
+    case 'import-csv': $('#fileCsv').click(); break;
+    case 'backup': exportBackup(); break;
+    case 'restore': $('#fileBackup').click(); break;
+    case 'export-month': exportCsv('month'); break;
+    case 'export-all': exportCsv('all'); break;
+    case 'sync-setup': openSyncSheet(); break;
+    case 'sync-now': syncNow(); break;
+    case 'dismiss-install': lsSet(LS_FLAG_INSTALL, '1'); render(); break;
+  }
+});
+$('#q').addEventListener('input', e => { ui.q = e.target.value; renderList(); });
+$('#fileReceipt').addEventListener('change', e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; handleReceiptFile(f); });
+$('#fileCsv').addEventListener('change', e => { const fs = Array.from(e.target.files || []); e.target.value = ''; handleCsvFiles(fs); });
+$('#fileBackup').addEventListener('change', e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; handleBackupFile(f); });
+$('#overlay').addEventListener('click', e => { if (e.target === $('#overlay') && !sheetLocked) closeSheet(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#overlay').hidden) closeSheet(); });
+
+/* ===== ホーム画面アプリとして使えるようにする ===== */
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); });
+}
+
+/* 動作確認用（画面には影響しません） */
+window.__kk = {get S() { return S; }, ui, store, syncNow, parseReceipt, parseMoneyCsv, render, preprocessImage, runOcr};
+
+render();
+initStore().then(() => { render(); if (syncOn() && S.sync.auto) setTimeout(() => syncNow({silent:true}), 1500); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && store.loaded && syncOn() && S.sync.auto && (!S.sync.last || Date.now() - S.sync.last > 5 * 60 * 1000)) syncNow({silent:true});
+});
+})();

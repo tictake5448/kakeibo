@@ -1,0 +1,7 @@
+このフォルダの部品は、レシートの文字認識をこの端末の中で行うために同梱しています。
+
+- core/tesseract-core-*.wasm.js : tesseract.js-core（Apache License 2.0）
+  https://github.com/naptha/tesseract.js-core  （ライセンス全文: LICENSE-tesseract.js-core.txt）
+  内部で Tesseract OCR（Apache License 2.0）を使用しています。
+- lang/jpn.traineddata : tessdata_best の日本語モデル（Apache License 2.0）
+  https://github.com/tesseract-ocr/tessdata_best
