@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.3.4';
+const APP_VERSION = '1.3.5';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -367,7 +367,7 @@ const HEADER_RE = /(No\.?\s*\d|[ス責]\s*No|会計機|スキャン|領収証|�
 const END_RE = /^(小計|合計|総合計|お?買上|お会計|ご?請求|お預|お釣|おつり|釣銭|釣り|税込|対象|外税|内税|内消費税|消費税|クレジット|現金|カード|電子マネー|支払|ポイント|点数|\(?\d+%対象)/;
 const QTY_RE = /^\s*(\d+\s*(コ|個|点|本|袋|枚|パック)?\s*([xX×@]|\*\s*[\d単])|[@*]\s*\d|単\s*\d)/;   // 「0050* 品名」のような商品コードは数量行ではない
 const DISC_RE = /(値引|割引|クーポン|値下|ポイント利用|ポイント値引|割\s*$|引\s*$)/;
-const TOTAL_RE = /(合計|お?買上|お会計|総合計|ご?請求|TOTAL|お支払い?金額)/i;
+const TOTAL_RE = /(合計|今計|合書|合話|お?買上|お会計|総合計|ご?請求|TOTAL|お支払い?金額)/i;
 const NOT_TOTAL_RE = /(小計|対象|消費税|内税|外税|点数|ポイント|預|釣)/;
 const hasLetter = s => /[A-Za-z぀-ヿ㐀-鿿]/.test(s);
 
@@ -392,6 +392,10 @@ function matchItem(l) {
   if (nLetters < 2 || (!hasYen && la.amount < 10)) return null;     // 「装 5」のような読み違いを品目にしない
   const neg = la.neg || DISC_RE.test(label);
   return {label, amount: la.amount, neg};
+}
+/* 「広島商工センター店082-270-3368」「フレスポ西風新都店 2131」→ 電話番号・末尾の店番号を除く */
+function cleanStoreText(l) {
+  return String(l).replace(/(TEL|Tel|電話)?[\s.:：]*\d{2,4}-\d{2,4}-\d{3,4}.*$/, '').replace(/\s+[#＃]?\d{1,6}$/, '').trim();
 }
 function isStoreLine(l) {
   if (HEADER_RE.test(l) || findDate(l, new Date())) return false;
@@ -456,11 +460,18 @@ function parseReceipt(text, now) {
     if (/(TEL|Tel|電話|\d{2,4}-\d{2,4}-\d{3,4})/.test(lines[i])) {
       const pre = lines[i].replace(/(TEL|Tel|電話)?[\s.:：]*\d{2,4}-\d{2,4}-\d{3,4}.*$/, '').trim();   // 「広島商工センター店082-270-3368」→「広島商工センター店」
       if (pre && pre !== lines[i] && cjkN(pre) >= 3 && isStoreLine(pre)) { lines[i] = pre; si = i; break; }
-      for (let j = i - 1; j >= Math.max(0, i - 5) && si < 0; j--) if (/店$/.test(lines[j]) && isStoreLine(lines[j]) && cjkN(lines[j]) >= 3) si = j;   // 住所行をはさんでいても「〜店」を優先
+      for (let j = i - 1; j >= Math.max(0, i - 5) && si < 0; j--) {   // 住所行をはさんでいても「〜店」を優先
+        const c = cleanStoreText(lines[j]);
+        if (/店$/.test(c) && isStoreLine(c) && cjkN(c) >= 3) { lines[j] = c; si = j; }
+      }
       if (si >= 0) break;
       for (let j = i - 1; j >= Math.max(0, i - 2); j--) if (isStoreLine(lines[j]) && cjkN(lines[j]) >= 3) { si = j; break; }
       break;
     }
+  }
+  if (si < 0) for (let i = 0; i < Math.min(lines.length, 14); i++) {
+    const c = cleanStoreText(lines[i]);
+    if (/店$/.test(c) && isStoreLine(c) && cjkN(c) >= 3) { lines[i] = c; si = i; break; }
   }
   if (si < 0) for (let i = 0; i < Math.min(lines.length, 10); i++) {
     if (/(店|院|クリニック|薬局|カフェ|マート|ストア|食堂|ホテル|ドラッグ)/.test(lines[i]) && isStoreLine(lines[i])) { si = i; break; }
@@ -476,7 +487,7 @@ function parseReceipt(text, now) {
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     if (info.total === null && TOTAL_RE.test(l) && !NOT_TOTAL_RE.test(l)) {
-      const la = lastAmount(l);
+      const la = lastAmount(l.replace(/\s*(\(?\d+点\)?|税込?|円|\))+\s*$/, ''));   // 「合計 ¥837 税」「合計 ¥420 (2点)」
       if (la && la.amount > 0) { info.total = la.amount; ended = true; }   // 合計より下は品目ではない
     }
     if (ended || used.has(i) || i < from) continue;
@@ -526,6 +537,15 @@ function parseReceipt(text, now) {
     const yens = new Set();
     for (const l of lines) for (const m of l.matchAll(/¥\s?(\d{1,7})/g)) yens.add(Number(m[1]));
     if (sum > 0 && yens.has(sum)) info.total = sum;
+  }
+  if (info.total === null) {                                    // それでも無いとき: 何度も出てくる金額を合計と推定（確認画面に「推定」と表示）
+    const cnt = new Map();
+    for (const l of lines) {
+      if (/(ポイント|番号|\*{3}|消費税|内税|外税|対象|税率|お釣|釣|預|%|TEL|Tel)/.test(l)) continue;
+      for (const m of l.matchAll(/¥\s?(\d{1,7})(?!\d)/g)) { const v = Number(m[1]); if (v >= 10) cnt.set(v, (cnt.get(v) || 0) + 1); }
+    }
+    const best = [...cnt].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0];
+    if (best && best[1] >= 2) { info.total = best[0]; info.totalGuess = true; }
   }
   return info;
 }
@@ -1594,7 +1614,7 @@ function openReceiptReview(info, rawText, thumb) {
   const R = {
     id: uid(), date: info.date || todayStr(), store: info.store || '', brand: info.brand || '', seq: info.seq || '',
     pay: brandPay || ((info.pay && S.pays.some(p => p.id === info.pay)) ? info.pay : (S.pays.some(p => p.id === ui.lastPay) ? ui.lastPay : (S.pays[0] ? S.pays[0].id : ''))),
-    mode: info.items.length ? 'items' : 'single', learn: true, total: info.total, readN: info.items.length,
+    mode: info.items.length ? 'items' : 'single', learn: true, total: info.total, totalGuess: !!info.totalGuess, readN: info.items.length,
     items: info.items.map(it => { const s = suggestCat(it.label, info.store); return {label:it.label, amt:it.amount, neg:it.neg, cat:s ? s.c : '', sug:!!s, inc:true}; }),
     singleCat: '', singleSug: false, singleAmt: 0
   };
@@ -1663,7 +1683,7 @@ function openReceiptReview(info, rawText, thumb) {
         <label class="field"><span class="flabel">金額</span><span class="amount"><b>¥</b><input id="rSAmt" type="text" inputmode="numeric" value="${R.singleAmt ? R.singleAmt.toLocaleString('ja-JP') : ''}" placeholder="0" aria-label="合計金額"></span></label>
         <div class="field"><span class="flabel">分類</span><select id="rSCat" aria-label="分類">${catOpts(R.singleCat)}</select>
           <div class="item-note" id="rSNote" style="margin-top:6px">${R.singleSug && R.singleCat ? '<span class="tag">候補</span>自動で付けた分類です' : ''}</div></div>
-        ${R.total ? `<p class="note" style="margin-left:0">レシートから読み取った合計：${yen(R.total)}</p>` : ''}`;
+        ${R.total ? `<p class="note" style="margin-left:0">レシートから読み取った合計：${yen(R.total)}${R.totalGuess ? '（推定です。レシート画像と見比べてください）' : ''}</p>` : ''}`;
     }
     refresh();
   }
