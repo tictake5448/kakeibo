@@ -139,6 +139,7 @@ textarea{min-height:160px;font-family:var(--font-num);font-size:13px;line-height
 /* 設定 */
 .note{font-size:13px;color:var(--muted);margin:8px 4px 0}
 .stack{display:grid;gap:10px}
+.otag{display:inline-block;padding:0 7px;margin-right:6px;border-radius:8px;font-size:11.5px;line-height:18px;background:var(--accent-soft);color:var(--accent);font-weight:600}
 .sub-title{font-size:13px;color:var(--muted);margin:0 0 6px;letter-spacing:.04em}
 .kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 14px;margin:0;font-size:14px}
 .kv dt{color:var(--muted)}
