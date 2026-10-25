@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -36,7 +36,7 @@ const lsSet = (k,v) => { try { localStorage.setItem(k,v); } catch (e) {} };
 const cashflow = x => x.t === 'i' ? x.a : -x.a;   // 収入は+、支出は−（返金・値引きの負の支出は+になる）
 
 /* ===== 状態 ===== */
-let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], prices: {}, recSkips: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
+let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], pointNames: [], prices: {}, recSkips: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
 const store = { mode: 'init', persisted: null, error: false, loaded: false };
 const ui = { acctOwner:'all', tab:'home', month:curMonth(), filter:'all', q:'', aType:'e', aBy:'cat', setType:'e', lastPay:'cash', lastType:'e' };
 
@@ -99,16 +99,16 @@ async function idbLoadAll() {
   });
   return {months, meta};
 }
-const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, prices:S.prices, recSkips:S.recSkips, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, prices:S.prices, recSkips:S.recSkips, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
 /* 現資産の項目: {id, kind(cash/stock/btc/eth), owner(h夫/w妻/j共有), name, bal(円)/qty(数量)/price(株価), note, color, u}。収支の記録とは別に持つ */
 function cleanAcct(a) {
   if (!a || typeof a !== 'object') return null;
-  const kind = (a.kind === 'stock' || (a.kind && COINS[a.kind])) ? a.kind : 'cash';
+  const kind = (a.kind === 'stock' || a.kind === 'point' || (a.kind && COINS[a.kind])) ? a.kind : 'cash';
   const owner = Object.prototype.hasOwnProperty.call(OWNERS, a.owner) ? a.owner : '';
   let name = String(a.name || '').trim().slice(0, 20);
   if (!name) { if (COINS[kind]) name = COINS[kind].name; else return null; }
   const out = {id: String(a.id || 'a' + uid()), kind, owner, name, bal: 0, qty: 0, price: 0, note: String(a.note || '').slice(0, 30), color: String(a.color || '#8A8F98'), u: Number(a.u) || 0};
-  if (kind === 'cash') {
+  if (kind === 'cash' || kind === 'point') {
     const bal = Math.round(Number(a.bal));
     if (!Number.isFinite(bal) || bal < 0 || bal > 999999999999) return null;
     out.bal = bal;
@@ -152,6 +152,7 @@ function applyLoaded(months, meta) {
     if (meta.dels && typeof meta.dels === 'object' && !Array.isArray(meta.dels)) { S.dels = {}; for (const k of Object.keys(meta.dels)) if (Number(meta.dels[k])) S.dels[k] = Number(meta.dels[k]); }
     if (Array.isArray(meta.accts)) S.accts = meta.accts.map(cleanAcct).filter(Boolean);
     if (meta.recSkips && typeof meta.recSkips === 'object' && !Array.isArray(meta.recSkips)) { S.recSkips = {}; for (const k of Object.keys(meta.recSkips).slice(-3000)) S.recSkips[k] = 1; }
+    if (Array.isArray(meta.pointNames)) S.pointNames = meta.pointNames.map(x => String(x).trim().slice(0, 20)).filter(Boolean).slice(0, 40);
     if (Array.isArray(meta.acctNames)) S.acctNames = meta.acctNames.map(x => String(x).trim().slice(0, 20)).filter(Boolean).slice(0, 40);
     if (meta.prices && typeof meta.prices === 'object') {
       S.prices = {};
@@ -967,10 +968,11 @@ function renderSettings() {
 }
 /* ===== 現資産（預貯金・株式・暗号資産。収入・支出とは別に、いまの資産を持つ） ===== */
 const ACCT_PRESETS = ['三井住友銀行','PayPay銀行','楽天銀行','ゆうちょ銀行','三菱UFJ銀行','みずほ銀行','現金（手元）'];
+const POINT_PRESETS = ['楽天ポイント','Vポイント','PayPayポイント','dポイント','WAONポイント'];   // 1ポイント＝1円として評価
 const OWNERS = {h:'夫', w:'妻', j:'共有', '':'未設定'};
-const KINDS = {cash:'預貯金・現金', stock:'株式', btc:'ビットコイン', eth:'イーサリアム'};
+const KINDS = {cash:'預貯金・現金', stock:'株式', btc:'ビットコイン', eth:'イーサリアム', point:'ポイント'};
 const COINS = {btc:{name:'ビットコイン', sym:'BTC', bf:'BTC_JPY', cg:'bitcoin'}, eth:{name:'イーサリアム', sym:'ETH', bf:'ETH_JPY', cg:'ethereum'}};
-const KIND_GROUPS = [['cash','預貯金・現金'], ['stock','株式'], ['crypto','暗号資産']];
+const KIND_GROUPS = [['cash','預貯金・現金'], ['stock','株式'], ['crypto','暗号資産'], ['point','ポイント']];
 const groupOf = k => COINS[k] ? 'crypto' : k;
 const PRICE_TTL = 5 * 60 * 1000;
 /* 1つの資産のいまの評価額（円）。預貯金は残高、株式は株数×株価、暗号資産は保有数量×取得済みの価格 */
@@ -1035,6 +1037,7 @@ async function refreshPrices(force) {
 function acctDetail(a) {
   const parts = [];
   if (a.kind === 'stock') parts.push(`${fmtQty(a.qty, 4)}株 × ${yen(a.price)}`);
+  else if (a.kind === 'point') parts.push(`${fmtQty(a.bal, 0)} pt`);
   else if (COINS[a.kind]) {
     const c = COINS[a.kind], p = S.prices[a.kind];
     parts.push(`${fmtQty(a.qty, 8)} ${c.sym}` + (p ? ` × ${yen(p.p)}` : '（価格未取得）'));
@@ -1051,7 +1054,7 @@ function renderAcct() {
     box.innerHTML = `
       <div class="welcome card">
         <h2>現資産を登録しましょう</h2>
-        <p>預貯金・現金、株式、ビットコイン・イーサリアムを、夫・妻の持ち主ごとに登録すると、どこにいくらあるかを一覧で見られます。収入・支出の記録とは別に保存されます。</p>
+        <p>預貯金・現金、株式、ビットコイン・イーサリアム、ポイントを、夫・妻の持ち主ごとに登録すると、どこにいくらあるかを一覧で見られます。収入・支出の記録とは別に保存されます。</p>
         <div class="chips">${ACCT_PRESETS.slice(0, 5).map(n => `<button type="button" class="chip" data-act="acctpreset" data-name="${esc(n)}">${esc(n)}</button>`).join('')}</div>
         <button type="button" class="btn primary" data-act="addacct">資産を追加する</button>
       </div>`;
@@ -1102,7 +1105,7 @@ function renderAcct() {
     </div>
     ${groups}
     <div style="margin-top:14px"><button type="button" class="btn" data-act="addacct" style="width:100%">＋ 資産を追加</button></div>
-    <p class="note">残高や数量が変わったら、その資産をタップして更新してください。株式の株価は手入力です。ビットコイン・イーサリアムの価格は自動で取得します（円換算）。ここの金額は収入・支出の記録には影響しません。</p>`;
+    <p class="note">残高や数量が変わったら、その資産をタップして更新してください。株式の株価は手入力です。ビットコイン・イーサリアムの価格は自動で取得します（円換算）。ポイントは1ポイント＝1円として合計に含めます。ここの金額は収入・支出の記録には影響しません。</p>`;
 }
 
 function openAcctSheet(item, preset) {
@@ -1110,10 +1113,12 @@ function openAcctSheet(item, preset) {
   const nameList = () => [...new Set([...ACCT_PRESETS, ...S.acctNames])];
   const d = item ? {...item} : {id:'a' + uid()};
   const st = item
-    ? {kind:item.kind, owner:item.owner, nameSel:'', name:item.name, bal:item.kind === 'cash' ? String(item.bal) : '', qty:item.qty ? String(item.qty) : '',
+    ? {kind:item.kind, owner:item.owner, nameSel:'', name:item.name, bal:(item.kind === 'cash' || item.kind === 'point') ? String(item.bal) : '', qty:item.qty ? String(item.qty) : '',
        price:item.kind === 'stock' ? (item.price ? String(item.price) : '') : (COINS[item.kind] && S.prices[item.kind] ? String(S.prices[item.kind].p) : ''), note:item.note, color:item.color}
     : {kind:'cash', owner:(ui.acctOwner === 'h' || ui.acctOwner === 'w' || ui.acctOwner === 'j') ? ui.acctOwner : '', nameSel:'', name:preset || '', bal:'', qty:'', price:'', note:'', color:PAL[S.accts.length % PAL.length]};
-  if (st.kind === 'cash' && st.name) st.nameSel = nameList().includes(st.name) ? st.name : '+';
+  const isNamed = k => k === 'cash' || k === 'point';       // 一覧から名前を選ぶ種類（口座名・ポイント名）
+  const namesFor = k => k === 'point' ? [...new Set([...POINT_PRESETS, ...S.pointNames])] : nameList();
+  if (isNamed(st.kind) && st.name) st.nameSel = namesFor(st.kind).includes(st.name) ? st.name : '+';
   let confirming = false;
   const sheet = openSheet(`
     <div class="sheet-head"><h2>資産を${isNew ? '追加' : '編集'}</h2>${closeBtn('aClose')}</div>
@@ -1136,22 +1141,23 @@ function openAcctSheet(item, preset) {
       <div class="field"><span class="flabel">持ち主（夫・妻）</span><div class="chips" id="aOwners">${['h', 'w', 'j'].map(o => chip('data-o', o, OWNERS[o], st.owner === o)).join('')}</div></div>`;
   };
   const valueNow = () => {
-    if (st.kind === 'cash') return st.bal ? Number(st.bal) : null;
+    if (isNamed(st.kind)) return st.bal ? Number(st.bal) : null;
     const q = parseFloat(st.qty), p = parseFloat(st.price);
     return Number.isFinite(q) && Number.isFinite(p) ? Math.round(q * p) : null;
   };
   const paintPrev = () => {
     const el = $a('#aPrev'); if (!el) return;
     const v = valueNow();
-    el.textContent = v === null ? '' : '＝ ' + yen(v);
+    el.textContent = v === null ? '' : (st.kind === 'point' ? `＝ ${v.toLocaleString('ja-JP')} pt（1pt＝1円で評価）` : '＝ ' + yen(v));
   };
   const paintDyn = () => {
     const k = st.kind, c = COINS[k];
     let h = '';
-    if (k === 'cash') {
-      h = `<div class="field"><span class="flabel">口座名（一覧にないときは「＋ その他」で自由入力）</span><div class="chips" id="aNames">${nameList().map(n => `<button type="button" class="chip small" data-n="${esc(n)}" aria-pressed="${st.nameSel === n}">${esc(n)}</button>`).join('')}<button type="button" class="chip small" data-n="+" aria-pressed="${st.nameSel === '+'}">＋ その他（自由入力）</button></div></div>
-        ${st.nameSel === '+' ? `<label class="field"><span class="flabel">口座名を入力</span><input id="aName" type="text" maxlength="20" autocomplete="off" placeholder="例：地方銀行、会社の財形" value="${esc(st.name)}"></label>` : ''}
-        <label class="field"><span class="flabel">現在の残高</span><span class="amount"><b>¥</b><input id="aBal" type="text" inputmode="numeric" autocomplete="off" placeholder="0" value="${esc(st.bal)}" aria-label="現在の残高"></span></label>`;
+    if (isNamed(k)) {
+      const pt = k === 'point';
+      h = `<div class="field"><span class="flabel">${pt ? 'ポイント名' : '口座名'}（一覧にないときは「＋ その他」で自由入力）</span><div class="chips" id="aNames">${namesFor(k).map(n => `<button type="button" class="chip small" data-n="${esc(n)}" aria-pressed="${st.nameSel === n}">${esc(n)}</button>`).join('')}<button type="button" class="chip small" data-n="+" aria-pressed="${st.nameSel === '+'}">＋ その他（自由入力）</button></div></div>
+        ${st.nameSel === '+' ? `<label class="field"><span class="flabel">${pt ? 'ポイント名' : '口座名'}を入力</span><input id="aName" type="text" maxlength="20" autocomplete="off" placeholder="${pt ? '例：Pontaポイント、JALマイル' : '例：地方銀行、会社の財形'}" value="${esc(st.name)}"></label>` : ''}
+        <label class="field"><span class="flabel">${pt ? '現在のポイント残高' : '現在の残高'}</span><span class="amount"><b>${pt ? 'pt' : '¥'}</b><input id="aBal" type="text" inputmode="numeric" autocomplete="off" placeholder="0" value="${esc(st.bal)}" aria-label="${pt ? '現在のポイント残高' : '現在の残高'}"></span></label>`;
     } else if (k === 'stock') {
       h = `<label class="field"><span class="flabel">銘柄名</span><input id="aName" type="text" maxlength="20" autocomplete="off" placeholder="例：トヨタ自動車、S&P500のインデックス" value="${esc(st.name)}"></label>
         <label class="field"><span class="flabel">保有株数</span><input id="aQty" type="text" inputmode="decimal" autocomplete="off" placeholder="0" value="${esc(st.qty)}"></label>
@@ -1182,16 +1188,16 @@ function openAcctSheet(item, preset) {
     const k = st.kind;
     if (!st.owner) { setErr('持ち主（夫・妻・共有）を選んでください。'); return; }
     let name;
-    if (k === 'cash') {
+    if (isNamed(k)) {
       name = (st.nameSel === '+' ? st.name : st.nameSel).trim();
-      if (!name) { setErr('口座名を選ぶか、「＋ その他」で入力してください。'); return; }
+      if (!name) { setErr(`${k === 'point' ? 'ポイント名' : '口座名'}を選ぶか、「＋ その他」で入力してください。`); return; }
     } else if (k === 'stock') {
       name = st.name.trim();
       if (!name) { setErr('銘柄名を入力してください。'); return; }
     } else name = COINS[k].name;
     const out = {id:d.id, kind:k, owner:st.owner, name:name.slice(0, 20), bal:0, qty:0, price:0, note:$a('#aNote').value.trim().slice(0, 30), color:st.color, u:item ? item.u : 0};
-    if (k === 'cash') {
-      if (!st.bal) { setErr('残高を入力してください（0円でも入力できます）。'); return; }
+    if (isNamed(k)) {
+      if (!st.bal) { setErr(k === 'point' ? 'ポイント残高を入力してください（0でも入力できます）。' : '残高を入力してください（0円でも入力できます）。'); return; }
       out.bal = Number(st.bal);
     } else {
       const q = parseFloat(st.qty);
@@ -1207,7 +1213,9 @@ function openAcctSheet(item, preset) {
     }
     const changed = isNew || out.bal !== item.bal || out.qty !== item.qty || out.price !== item.price;
     if (changed) out.u = Date.now();
-    if (k === 'cash' && st.nameSel === '+' && !nameList().includes(out.name)) S.acctNames = [...S.acctNames, out.name].slice(-40);   // 次回から一覧に出る
+    if (isNamed(k) && st.nameSel === '+' && !namesFor(k).includes(out.name)) {                                              // 次回から一覧に出る
+      if (k === 'point') S.pointNames = [...S.pointNames, out.name].slice(-40); else S.acctNames = [...S.acctNames, out.name].slice(-40);
+    }
     S.accts = isNew ? [...S.accts, out] : S.accts.map(a => a.id === out.id ? out : a);
     saveMeta(); closeSheet(); toast('保存しました'); render();
   }
@@ -1215,9 +1223,8 @@ function openAcctSheet(item, preset) {
     const t = e.target;
     const kb = t.closest('#aKinds button[data-k]');
     if (kb) {
-      st.kind = kb.dataset.k; st.qty = ''; st.bal = '';
+      st.kind = kb.dataset.k; st.qty = ''; st.bal = ''; st.nameSel = ''; st.name = '';
       st.price = COINS[st.kind] && S.prices[st.kind] ? String(S.prices[st.kind].p) : '';
-      if (st.kind !== 'cash' && !COINS[st.kind] && KINDS[st.name] !== undefined) st.name = '';
       paintTop(); paintDyn(); setErr(''); return;
     }
     const ob = t.closest('#aOwners button[data-o]');
@@ -1225,7 +1232,7 @@ function openAcctSheet(item, preset) {
     const nb = t.closest('#aNames button[data-n]');
     if (nb) {
       st.nameSel = nb.dataset.n;
-      if (st.nameSel === '+') { if (nameList().includes(st.name)) st.name = ''; } else st.name = st.nameSel;
+      if (st.nameSel === '+') { if (namesFor(st.kind).includes(st.name)) st.name = ''; } else st.name = st.nameSel;
       paintDyn(); setErr('');
       if (st.nameSel === '+') { const n = $a('#aName'); if (n) n.focus(); } else { const b = $a('#aBal'); if (b) b.focus(); }
       return;
@@ -1243,7 +1250,7 @@ function openAcctSheet(item, preset) {
   };
   $a('#aClose').onclick = closeSheet;
   paintTop(); paintDyn(); paintSw(); paintActions();
-  if (isNew && st.kind === 'cash' && !st.nameSel) setTimeout(() => { try { $a('#aOwners button').focus(); } catch (e) {} }, 60);
+  if (isNew && isNamed(st.kind) && !st.nameSel) setTimeout(() => { try { $a('#aOwners button').focus(); } catch (e) {} }, 60);
 }
 
 /* ===== 入力シート ===== */
@@ -1481,7 +1488,7 @@ async function exportCsv(scope) {
 /* ===== バックアップ ===== */
 async function exportBackup() {
   if (!realCount() && !Object.keys(S.learn).length && !S.accts.length) { toast('バックアップする記録がありません'); return; }
-  const data = {app:'kakeibo', version:1, exportedAt:new Date().toISOString(), cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, months:S.months};
+  const data = {app:'kakeibo', version:1, exportedAt:new Date().toISOString(), cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, months:S.months};
   const d = todayStr().replace(/-/g, '');
   const r = await deliverFile(JSON.stringify(data), `kakeibo-backup-${d}.json`, 'application/json');
   if (r === 'shared' || r === 'downloaded') {
@@ -1512,7 +1519,7 @@ async function handleBackupFile(file) {
     <div class="sheet-foot"><div class="actions"><button type="button" class="btn" id="bNo">やめる</button><button type="button" class="btn danger solid primary" id="bYes">置き換えて復元</button></div></div>`, 'バックアップから復元');
   sheet.querySelector('#bClose').onclick = sheet.querySelector('#bNo').onclick = closeSheet;
   sheet.querySelector('#bYes').onclick = () => {
-    applyLoaded(months, {cats:obj.cats, pays:obj.pays, learn:obj.learn, accts:obj.accts, acctNames:obj.acctNames, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+    applyLoaded(months, {cats:obj.cats, pays:obj.pays, learn:obj.learn, accts:obj.accts, acctNames:obj.acctNames, pointNames:obj.pointNames, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
     saveAll();
     closeSheet(); toast(`${n.toLocaleString('ja-JP')}件を復元しました`); render();
   };
