@@ -244,3 +244,6 @@ textarea{min-height:160px;font-family:var(--font-num);font-size:13px;line-height
 .ept{font-family:var(--font-num);font-weight:600;white-space:nowrap;color:var(--accent)}
 .erow.done{opacity:.45}
 .erow.done .ept{color:var(--muted)}
+.tab{position:relative}
+.tbadge{position:absolute;top:4px;left:calc(50% + 6px);min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:#D93025;color:#fff;font-style:normal;font-size:11px;font-weight:700;line-height:17px;text-align:center;box-sizing:border-box}
+.erow:not(.done) .cat.alert::before{content:"";display:inline-block;width:9px;height:9px;margin-right:6px;border-radius:50%;background:#D93025;vertical-align:1px}

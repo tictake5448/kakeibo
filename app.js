@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.8.1';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -743,7 +743,7 @@ function isIos() { return /iPhone|iPad|iPod/.test(navigator.userAgent) || (navig
 const DAY = 86400000;
 
 function render() {
-  renderBar();
+  renderBar(); updateEntryBadge();
   for (const id of ['home','stats','acct','entry','set']) $('#v-' + id).hidden = ui.tab !== id;
   document.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-current', b.dataset.tab === ui.tab ? 'page' : 'false'));
   $('#fabwrap').hidden = ui.tab === 'set' || ui.tab === 'acct' || ui.tab === 'entry';
@@ -1267,12 +1267,24 @@ function openAcctSheet(item, preset) {
 /* ===== エントリー ===== */
 const fmtYMD = s => { const [y, m, d] = s.split('-').map(Number); return y === new Date().getFullYear() ? `${m}/${d}` : `${y}/${m}/${d}`; };
 const daysBetween = (a, b) => Math.round((Date.UTC(...b.split('-').map((n, i) => i === 1 ? n - 1 : +n)) - Date.UTC(...a.split('-').map((n, i) => i === 1 ? n - 1 : +n))) / DAY);
+/* 未達成で、実行日か期限の日が来た（今日以前）エントリー */
+const entryAlert = (e, today) => !e.done && ((e.run && e.run <= today) || (e.due && e.due <= today));
+function updateEntryBadge() {
+  const btn = document.querySelector('.tab[data-tab="entry"]'); if (!btn) return;
+  const n = S.entries.filter(e => entryAlert(e, todayStr())).length;
+  let b = btn.querySelector('.tbadge');
+  if (!n) { if (b) b.remove(); btn.removeAttribute('data-alert'); return; }
+  if (!b) { b = document.createElement('i'); b.className = 'tbadge'; btn.appendChild(b); }
+  b.textContent = n > 9 ? '9+' : String(n);
+  btn.dataset.alert = n;
+  btn.setAttribute('aria-label', `エントリー（日付になった未達成が${n}件）`);
+}
 function toggleEntry(id) {
   const e = S.entries.find(x => x.id === id); if (!e) return;
   const was = e.done;
   e.done = was ? '' : todayStr(); e.u = Date.now();
-  saveMeta(); renderEntries();
-  toast(was ? '未達成に戻しました' : `達成しました${e.pt ? `（${e.pt.toLocaleString('ja-JP')} pt）` : ''}`, {action:'元に戻す', fn: () => { e.done = was; e.u = Date.now(); saveMeta(); renderEntries(); }});
+  saveMeta(); renderEntries(); updateEntryBadge();
+  toast(was ? '未達成に戻しました' : `達成しました${e.pt ? `（${e.pt.toLocaleString('ja-JP')} pt）` : ''}`, {action:'元に戻す', fn: () => { e.done = was; e.u = Date.now(); saveMeta(); renderEntries(); updateEntryBadge(); }});
 }
 function renderEntries() {
   const box = $('#entry');
@@ -1287,11 +1299,11 @@ function renderEntries() {
   const done = S.entries.filter(e => e.done).sort((a, b) => cmp(b.done, a.done));
   const sum = l => l.reduce((s, e) => s + e.pt, 0);
   const row = e => {
-    const late = !e.done && e.due && e.due < today;
+    const late = entryAlert(e, today);
     let dueTxt = '';
     if (e.due) {
       const left = daysBetween(today, e.due);
-      dueTxt = `期限 ${fmtYMD(e.due)}` + (e.done ? '' : late ? '（期限切れ）' : left === 0 ? '（今日まで）' : left <= 7 ? `（あと${left}日）` : '');
+      dueTxt = `期限 ${fmtYMD(e.due)}` + (e.done ? '' : e.due < today ? '（期限切れ）' : left === 0 ? '（今日まで）' : left <= 7 ? `（あと${left}日）` : '');
     }
     const lines = [];
     const dates = [e.run ? `実行日 ${fmtYMD(e.run)}` : '', dueTxt].filter(Boolean).join(' ／ ');
@@ -1300,7 +1312,7 @@ function renderEntries() {
     if (e.done) lines.push(`<span class="sub">達成日 ${fmtYMD(e.done)}</span>`);
     return `<div class="erow${e.done ? ' done' : ''}">
       <button type="button" class="echk" data-act="toggleentry" data-id="${esc(e.id)}" aria-pressed="${!!e.done}" aria-label="${esc(e.title)}を${e.done ? '未達成に戻す' : '達成にする'}"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span></button>
-      <button type="button" class="emain" data-act="editentry" data-id="${esc(e.id)}"><span class="cat">${esc(e.title)}</span>${lines.join('')}</button>
+      <button type="button" class="emain" data-act="editentry" data-id="${esc(e.id)}"><span class="cat${late ? ' alert' : ''}">${esc(e.title)}</span>${lines.join('')}</button>
       <span class="ept">${e.pt ? '+' + e.pt.toLocaleString('ja-JP') + ' pt' : ''}</span>
     </div>`;
   };
@@ -2623,7 +2635,7 @@ window.__kk = {get S() { return S; }, ui, store, syncNow, parseReceipt, parseMon
 
 render();
 initStore().then(() => { materializeRecurring(); render(); if (syncOn() && S.sync.auto) setTimeout(() => syncNow({silent:true}), 1500); });
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && store.loaded) materializeRecurring(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && store.loaded) { materializeRecurring(); updateEntryBadge(); if (ui.tab === 'entry') renderEntries(); } });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && store.loaded && syncOn() && S.sync.auto && (!S.sync.last || Date.now() - S.sync.last > 5 * 60 * 1000)) syncNow({silent:true});
 });
