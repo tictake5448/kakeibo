@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.5.1';
+const APP_VERSION = '1.6.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -36,7 +36,7 @@ const lsSet = (k,v) => { try { localStorage.setItem(k,v); } catch (e) {} };
 const cashflow = x => x.t === 'i' ? x.a : -x.a;   // 収入は+、支出は−（返金・値引きの負の支出は+になる）
 
 /* ===== 状態 ===== */
-let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], prices: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
+let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], prices: {}, recSkips: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
 const store = { mode: 'init', persisted: null, error: false, loaded: false };
 const ui = { acctOwner:'all', tab:'home', month:curMonth(), filter:'all', q:'', aType:'e', aBy:'cat', setType:'e', lastPay:'cash', lastType:'e' };
 
@@ -99,7 +99,7 @@ async function idbLoadAll() {
   });
   return {months, meta};
 }
-const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, prices:S.prices, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, prices:S.prices, recSkips:S.recSkips, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
 /* 現資産の項目: {id, kind(cash/stock/btc/eth), owner(h夫/w妻/j共有), name, bal(円)/qty(数量)/price(株価), note, color, u}。収支の記録とは別に持つ */
 function cleanAcct(a) {
   if (!a || typeof a !== 'object') return null;
@@ -131,6 +131,8 @@ function cleanTx(x) {
   const out = {id: String(x.id || uid()), d: String(x.d), t: x.t === 'i' ? 'i' : 'e', c: String(x.c || ''), a: Math.round(a), p: String(x.p || ''), n: String(x.n || '').slice(0, 120), s: Number(x.s) || 0, u: Number(x.u) || 0};
   if (x.mf) out.mf = String(x.mf);
   if (x.r) out.r = String(x.r);
+  if (x.rid) { out.rid = String(x.rid); out.rd = Math.min(31, Math.max(1, Number(x.rd) || Number(out.d.slice(8)))); }   // 毎月の支払いの系列（rid）と支払日（rd）
+  if (x.rid && x.rec) out.rec = 1;                                                                                    // 「毎月」のチェック
   return out;
 }
 function applyLoaded(months, meta) {
@@ -149,6 +151,7 @@ function applyLoaded(months, meta) {
     S.lastBackup = Number(meta.lastBackup) || null;
     if (meta.dels && typeof meta.dels === 'object' && !Array.isArray(meta.dels)) { S.dels = {}; for (const k of Object.keys(meta.dels)) if (Number(meta.dels[k])) S.dels[k] = Number(meta.dels[k]); }
     if (Array.isArray(meta.accts)) S.accts = meta.accts.map(cleanAcct).filter(Boolean);
+    if (meta.recSkips && typeof meta.recSkips === 'object' && !Array.isArray(meta.recSkips)) { S.recSkips = {}; for (const k of Object.keys(meta.recSkips).slice(-3000)) S.recSkips[k] = 1; }
     if (Array.isArray(meta.acctNames)) S.acctNames = meta.acctNames.map(x => String(x).trim().slice(0, 20)).filter(Boolean).slice(0, 40);
     if (meta.prices && typeof meta.prices === 'object') {
       S.prices = {};
@@ -249,6 +252,7 @@ function deleteTx(orig) {
   S.months[ok] = (S.months[ok] || []).filter(x => x.id !== orig.id);
   saveMonth(ok);
   S.dels[orig.id] = Date.now();
+  if (orig.rid) S.recSkips[orig.id] = 1;     // 毎月の支払いを削除した月は、自動で作り直さない
   saveMeta();
   scheduleSync();
 }
@@ -274,6 +278,7 @@ function undoBatch(b) {
   if (!b) return;
   const tnow = Date.now();
   for (const id of b.ids) S.dels[id] = tnow;
+  if (b.rec) for (const id of b.ids) S.recSkips[id] = 1;     // 「毎月」の自動記録を取り消したときも、同じ月は作り直さない
   saveMeta();
   scheduleSync();
   for (const k of b.months) {
@@ -289,6 +294,49 @@ function undoBatch(b) {
   render();
   toast('取り消しました');
 }
+/* ===== 毎月の支払い =====
+   「毎月」にチェックした支出は、同じ系列（rid）の最新の記録をもとに、毎月の支払日（rd）に同じ内容を自動で記録する（支払日が来た月まで）。
+   支払いが終わったら、最新の月の記録で「毎月」のチェックを外すと、それ以降は記録されない。 */
+function latestOfSeries(rid) {
+  let last = null;
+  for (const x of allTx()) if (x.rid === rid && (!last || x.d > last.d || (x.d === last.d && (x.u || 0) > (last.u || 0)))) last = x;
+  return last;
+}
+function materializeRecurring(quiet) {
+  if (!store.loaded) return {n: 0};
+  const today = todayStr(), cm = curMonth();
+  const latest = new Map();
+  for (const x of allTx()) {
+    if (!x.rid) continue;
+    const cur = latest.get(x.rid);
+    if (!cur || x.d > cur.d || (x.d === cur.d && (x.u || 0) > (cur.u || 0))) latest.set(x.rid, x);
+  }
+  const txs = [];
+  for (const [rid, last] of latest) {
+    if (!last.rec || last.t !== 'e') continue;                 // 最新の記録のチェックが外れていれば停止中
+    const rd = last.rd || Number(last.d.slice(8));
+    let m = last.d.slice(0, 7);
+    for (let i = 0; i < 120; i++) {
+      m = shiftMonth(m, 1);
+      if (m > cm) break;
+      const [y, mo] = m.split('-').map(Number);
+      const d = `${m}-${pad(Math.min(rd, new Date(y, mo, 0).getDate()))}`;   // 31日払いは、30日までの月は月末にする
+      if (d > today) break;
+      const id = `r${rid}_${m.replace('-', '')}`;
+      if (S.recSkips[id] || S.dels[id] || findTx(id)) continue;
+      txs.push({id, d, t: 'e', c: last.c, a: last.a, p: last.p, n: last.n, s: Date.now() + txs.length, rid, rd, rec: 1});
+    }
+  }
+  if (!txs.length) return {n: 0};
+  const batch = addBatch(txs);
+  batch.rec = true;
+  if (!quiet) {
+    toast(`毎月の支払い${txs.length}件を記録しました`, {action: '取り消す', fn: () => undoBatch(batch), ms: 9000});
+    render();
+  }
+  return {n: txs.length, batch};
+}
+
 /* ===== CSV 読み込み（MoneyForward ME / このアプリのCSV） ===== */
 function decodeText(buf) {
   const u8 = new Uint8Array(buf);
@@ -797,7 +845,7 @@ function renderList() {
       const cf = cashflow(x);
       return `<button type="button" class="row" data-act="edit" data-id="${esc(x.id)}">
         <i class="dot" style="background:${c.color}"></i>
-        <span class="main"><span class="cat">${esc(c.name)}</span><span class="sub">${esc(sub)}</span></span>
+        <span class="main"><span class="cat">${esc(c.name)}</span><span class="sub">${x.rec ? '<span class="otag">毎月</span>' : ''}${esc(sub)}</span></span>
         <span class="amt${cf > 0 ? ' inc' : ''}">${cf > 0 ? '+' : '−'}${yen(x.a)}</span>
       </button>`;
     }).join('');
@@ -1220,6 +1268,7 @@ function openTxSheet(orig) {
     <label class="field"><span class="flabel">日付</span><input id="fDate" type="date"></label>
     <div class="field"><span class="flabel">支払方法</span><div class="chips" id="fPays"></div></div>
     <label class="field"><span class="flabel">メモ</span><input id="fMemo" type="text" maxlength="80" placeholder="例：スーパー" autocomplete="off"></label>
+    <div id="fRecBox"></div>
     <p class="err" id="fErr" role="alert"></p>
     <div class="sheet-foot" id="fActions"></div>`, orig ? '記録を編集' : '記録を入力');
 
@@ -1242,10 +1291,24 @@ function openTxSheet(orig) {
       : '<span class="muted">カテゴリがありません。設定から追加してください。</span>';
   };
   const paintPays = () => { sheet.querySelector('#fPays').innerHTML = payChips(d.p, orig); };
+  // 「毎月」のチェック（支出のみ）。同じ系列の最新の月でチェックを外すと停止する
+  const series = orig && orig.rid ? latestOfSeries(orig.rid) : null;
+  const notLatest = !!(series && series.id !== orig.id);
+  d.rec = !!(orig && orig.rec);
+  const paintRec = () => {
+    const box = sheet.querySelector('#fRecBox');
+    if (d.t !== 'e') { box.innerHTML = ''; return; }
+    let note;
+    if (notLatest) note = `この記録より新しい月（${series.d.slice(0, 4)}年${Number(series.d.slice(5, 7))}月）の記録があります。支払いを止めるときは、最新の月の記録で「毎月」のチェックを外してください。`;
+    else if (orig && orig.rid && !orig.rec) note = '毎月の記録は停止中です。チェックを入れて保存すると、再開します。';
+    else if (orig && orig.rec) note = '支払いが終わったら、チェックを外して保存してください。これ以降は自動で記録されません（記録済みの月は残ります）。';
+    else note = '毎月の同じ日に、同じ金額・カテゴリで自動で記録します。支払いが終わったら、いちばん新しい月の記録でチェックを外してください。';
+    box.innerHTML = `<label class="opt" style="margin-top:14px"><input type="checkbox" id="fRec" ${d.rec ? 'checked' : ''} ${notLatest ? 'disabled' : ''}>毎月支払う</label><p class="note" style="margin:0 4px">${esc(note)}</p>`;
+  };
   const paintActions = () => {
     const box = sheet.querySelector('#fActions');
     if (confirming) {
-      box.innerHTML = `<div class="confirm"><p><b>この記録を削除しますか？</b>元に戻せません。</p><div class="actions"><button type="button" class="btn" id="fNo">やめる</button><button type="button" class="btn danger solid primary" id="fYes">削除する</button></div></div>`;
+      box.innerHTML = `<div class="confirm"><p><b>この記録を削除しますか？</b>元に戻せません。${orig && orig.rid ? '<br><span class="muted" style="font-size:13px">毎月の支払いを止めるときは、削除ではなく「毎月」のチェックを外してください。</span>' : ''}</p><div class="actions"><button type="button" class="btn" id="fNo">やめる</button><button type="button" class="btn danger solid primary" id="fYes">削除する</button></div></div>`;
       box.querySelector('#fNo').onclick = () => { confirming = false; paintActions(); };
       box.querySelector('#fYes').onclick = () => { deleteTx(orig); closeSheet(); toast('削除しました'); render(); };
     } else {
@@ -1265,11 +1328,18 @@ function openTxSheet(orig) {
     const tx = {id: orig ? orig.id : uid(), d: fDate.value, t: d.t, c: d.c, a, p: d.p, n: fMemo.value.trim().slice(0,80), s: orig ? (orig.s || Date.now()) : Date.now()};
     if (orig && orig.mf) tx.mf = orig.mf;
     if (orig && orig.r) tx.r = orig.r;
+    if (d.t === 'e' && (d.rec || (orig && orig.rid))) {                // 毎月の系列。チェックが無ければ停止（系列は覚えておく）
+      tx.rid = (orig && orig.rid) || uid();
+      tx.rd = (orig && orig.rd && orig.d === tx.d) ? orig.rd : Number(tx.d.slice(8));
+      if (d.rec) tx.rec = 1;
+    }
     saveTx(tx, orig);
     ui.lastPay = d.p; ui.lastType = d.t;
     ui.month = tx.d.slice(0,7);
     closeSheet();
-    toast(orig ? '更新しました' : '記録しました');
+    const gen = tx.rec ? materializeRecurring(true) : null;            // 過去の日付で「毎月」にした場合は、今月までの分を追加
+    if (gen && gen.n) toast(`${orig ? '更新しました' : '記録しました'}。毎月の分${gen.n}件も追加しました`, {action: '取り消す', fn: () => undoBatch(gen.batch), ms: 9000});
+    else toast(orig ? '更新しました' : '記録しました');
     render();
   };
   const fmtAmt = () => {
@@ -1289,10 +1359,11 @@ function openTxSheet(orig) {
   fAmt.addEventListener('input', () => { if (!composing) { fmtAmt(); err(''); } });
   fAmt.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); fAmt.blur(); } });
   sheet.querySelector('#fClose').onclick = closeSheet;
-  sheet.querySelector('#fType').onclick = e => { const b = e.target.closest('button[data-t]'); if (!b) return; d.t = b.dataset.t; d.c = null; paintHead(); paintCats(); err(''); };
+  sheet.querySelector('#fType').onclick = e => { const b = e.target.closest('button[data-t]'); if (!b) return; d.t = b.dataset.t; d.c = null; paintHead(); paintCats(); paintRec(); err(''); };
+  sheet.querySelector('#fRecBox').onchange = e => { if (e.target.id === 'fRec') d.rec = e.target.checked; };
   sheet.querySelector('#fCats').onclick = e => { const b = e.target.closest('button[data-c]'); if (!b) return; d.c = b.dataset.c; paintCats(); err(''); };
   sheet.querySelector('#fPays').onclick = e => { const b = e.target.closest('button[data-p]'); if (!b) return; d.p = b.dataset.p; paintPays(); };
-  paintHead(); paintCats(); paintPays(); paintActions();
+  paintHead(); paintCats(); paintPays(); paintRec(); paintActions();
   if (!orig) setTimeout(() => { try { fAmt.focus(); } catch (e) {} }, 60);
 }
 
@@ -2274,7 +2345,7 @@ function mergeFromSheet(res, wasEmpty) {
     const t = r.t === 'i' ? 'i' : 'e';
     const tx = cleanTx({id:r.id, d:r.d, t, c:resolveCat(r.cn, r.c, t, created), a:r.a, p:resolvePay(r.pn, r.p, created), n:r.n, s:local ? local.s : Date.now(), u:r.u});
     if (!tx) continue;
-    if (local) { dropTx(r.id); touched.add(local.d.slice(0,7)); st.upd++; if (local.mf) tx.mf = local.mf; if (local.r) tx.r = local.r; } else st.add++;
+    if (local) { dropTx(r.id); touched.add(local.d.slice(0,7)); st.upd++; if (local.mf) tx.mf = local.mf; if (local.r) tx.r = local.r; if (local.rid) { tx.rid = local.rid; tx.rd = local.rd; if (local.rec) tx.rec = 1; } } else st.add++;
     putTx(tx); touched.add(tx.d.slice(0,7));
     delete S.dels[r.id];
   }
@@ -2434,7 +2505,8 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
 window.__kk = {get S() { return S; }, ui, store, syncNow, parseReceipt, parseMoneyCsv, render, preprocessImage, runOcr};
 
 render();
-initStore().then(() => { render(); if (syncOn() && S.sync.auto) setTimeout(() => syncNow({silent:true}), 1500); });
+initStore().then(() => { materializeRecurring(); render(); if (syncOn() && S.sync.auto) setTimeout(() => syncNow({silent:true}), 1500); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && store.loaded) materializeRecurring(); });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && store.loaded && syncOn() && S.sync.auto && (!S.sync.last || Date.now() - S.sync.last > 5 * 60 * 1000)) syncNow({silent:true});
 });
