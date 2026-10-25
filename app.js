@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -36,7 +36,7 @@ const lsSet = (k,v) => { try { localStorage.setItem(k,v); } catch (e) {} };
 const cashflow = x => x.t === 'i' ? x.a : -x.a;   // 収入は+、支出は−（返金・値引きの負の支出は+になる）
 
 /* ===== 状態 ===== */
-let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], pointNames: [], prices: {}, recSkips: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
+let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], pointNames: [], entries: [], prices: {}, recSkips: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
 const store = { mode: 'init', persisted: null, error: false, loaded: false };
 const ui = { acctOwner:'all', tab:'home', month:curMonth(), filter:'all', q:'', aType:'e', aBy:'cat', setType:'e', lastPay:'cash', lastType:'e' };
 
@@ -99,7 +99,16 @@ async function idbLoadAll() {
   });
   return {months, meta};
 }
-const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, prices:S.prices, recSkips:S.recSkips, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, prices:S.prices, recSkips:S.recSkips, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+/* エントリー: {id, run(実行日), due(期限), title(内容), memo(詳細), pt(付与pt), done(達成日。空なら未達成), u} */
+function cleanEntry(e) {
+  if (!e || typeof e !== 'object') return null;
+  const title = String(e.title || '').trim().slice(0, 40);
+  if (!title) return null;
+  const dt = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : '';
+  const pt = Math.round(Number(e.pt));
+  return {id: String(e.id || 'e' + uid()), run: dt(e.run), due: dt(e.due), title, memo: String(e.memo || '').slice(0, 200), pt: Number.isFinite(pt) && pt > 0 ? Math.min(pt, 999999999) : 0, done: dt(e.done), u: Number(e.u) || 0};
+}
 /* 現資産の項目: {id, kind(cash/stock/btc/eth), owner(h夫/w妻/j共有), name, bal(円)/qty(数量)/price(株価), note, color, u}。収支の記録とは別に持つ */
 function cleanAcct(a) {
   if (!a || typeof a !== 'object') return null;
@@ -152,6 +161,7 @@ function applyLoaded(months, meta) {
     if (meta.dels && typeof meta.dels === 'object' && !Array.isArray(meta.dels)) { S.dels = {}; for (const k of Object.keys(meta.dels)) if (Number(meta.dels[k])) S.dels[k] = Number(meta.dels[k]); }
     if (Array.isArray(meta.accts)) S.accts = meta.accts.map(cleanAcct).filter(Boolean);
     if (meta.recSkips && typeof meta.recSkips === 'object' && !Array.isArray(meta.recSkips)) { S.recSkips = {}; for (const k of Object.keys(meta.recSkips).slice(-3000)) S.recSkips[k] = 1; }
+    if (Array.isArray(meta.entries)) S.entries = meta.entries.map(cleanEntry).filter(Boolean).slice(0, 2000);
     if (Array.isArray(meta.pointNames)) S.pointNames = meta.pointNames.map(x => String(x).trim().slice(0, 20)).filter(Boolean).slice(0, 40);
     if (Array.isArray(meta.acctNames)) S.acctNames = meta.acctNames.map(x => String(x).trim().slice(0, 20)).filter(Boolean).slice(0, 40);
     if (meta.prices && typeof meta.prices === 'object') {
@@ -734,19 +744,20 @@ const DAY = 86400000;
 
 function render() {
   renderBar();
-  for (const id of ['home','stats','acct','set']) $('#v-' + id).hidden = ui.tab !== id;
+  for (const id of ['home','stats','acct','entry','set']) $('#v-' + id).hidden = ui.tab !== id;
   document.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-current', b.dataset.tab === ui.tab ? 'page' : 'false'));
-  $('#fabwrap').hidden = ui.tab === 'set' || ui.tab === 'acct';
+  $('#fabwrap').hidden = ui.tab === 'set' || ui.tab === 'acct' || ui.tab === 'entry';
   if (ui.tab === 'home') { renderBanner(); renderSummary(); renderFilter(); renderList(); }
   else if (ui.tab === 'stats') renderStats();
   else if (ui.tab === 'acct') { renderAcct(); refreshPrices(false); }
+  else if (ui.tab === 'entry') renderEntries();
   else renderSettings();
 }
 
 function renderBar() {
   const [y,m] = ui.month.split('-').map(Number);
-  const isSet = ui.tab === 'set' || ui.tab === 'acct';   // 月の切り替えが要らない画面
-  $('#mLabel').textContent = ui.tab === 'set' ? '設定' : ui.tab === 'acct' ? '現資産' : `${y}年${m}月`;
+  const isSet = ui.tab === 'set' || ui.tab === 'acct' || ui.tab === 'entry';   // 月の切り替えが要らない画面
+  $('#mLabel').textContent = ui.tab === 'set' ? '設定' : ui.tab === 'acct' ? '現資産' : ui.tab === 'entry' ? 'エントリー' : `${y}年${m}月`;
   $('#navPrev').style.visibility = $('#navNext').style.visibility = isSet ? 'hidden' : 'visible';
   $('#todayBtn').hidden = isSet || ui.month === curMonth();
 }
@@ -1253,6 +1264,102 @@ function openAcctSheet(item, preset) {
   if (isNew && isNamed(st.kind) && !st.nameSel) setTimeout(() => { try { $a('#aOwners button').focus(); } catch (e) {} }, 60);
 }
 
+/* ===== エントリー ===== */
+const fmtYMD = s => { const [y, m, d] = s.split('-').map(Number); return y === new Date().getFullYear() ? `${m}/${d}` : `${y}/${m}/${d}`; };
+const daysBetween = (a, b) => Math.round((Date.UTC(...b.split('-').map((n, i) => i === 1 ? n - 1 : +n)) - Date.UTC(...a.split('-').map((n, i) => i === 1 ? n - 1 : +n))) / DAY);
+function toggleEntry(id) {
+  const e = S.entries.find(x => x.id === id); if (!e) return;
+  const was = e.done;
+  e.done = was ? '' : todayStr(); e.u = Date.now();
+  saveMeta(); renderEntries();
+  toast(was ? '未達成に戻しました' : `達成しました${e.pt ? `（${e.pt.toLocaleString('ja-JP')} pt）` : ''}`, {action:'元に戻す', fn: () => { e.done = was; e.u = Date.now(); saveMeta(); renderEntries(); }});
+}
+function renderEntries() {
+  const box = $('#entry');
+  if (!store.loaded) { box.innerHTML = '<div class="card"><p class="muted" style="margin:0">読み込み中…</p></div>'; return; }
+  if (!S.entries.length) {
+    box.innerHTML = `<div class="welcome card"><h2>エントリーを登録しましょう</h2><p>キャンペーンなどの「実行日・期限・内容・付与pt」を登録し、済んだものにチェックを入れると達成日が自動で入り、行がグレーになります。</p><button type="button" class="btn primary" data-act="addentry">エントリーを追加する</button></div>`;
+    return;
+  }
+  const today = todayStr();
+  const cmp = (a, b) => (a || '9999-99-99') < (b || '9999-99-99') ? -1 : (a || '9999-99-99') > (b || '9999-99-99') ? 1 : 0;
+  const open = S.entries.filter(e => !e.done).sort((a, b) => cmp(a.due, b.due) || cmp(a.run, b.run) || a.u - b.u);
+  const done = S.entries.filter(e => e.done).sort((a, b) => cmp(b.done, a.done));
+  const sum = l => l.reduce((s, e) => s + e.pt, 0);
+  const row = e => {
+    const late = !e.done && e.due && e.due < today;
+    let dueTxt = '';
+    if (e.due) {
+      const left = daysBetween(today, e.due);
+      dueTxt = `期限 ${fmtYMD(e.due)}` + (e.done ? '' : late ? '（期限切れ）' : left === 0 ? '（今日まで）' : left <= 7 ? `（あと${left}日）` : '');
+    }
+    const lines = [];
+    const dates = [e.run ? `実行日 ${fmtYMD(e.run)}` : '', dueTxt].filter(Boolean).join(' ／ ');
+    if (dates) lines.push(`<span class="sub${late ? ' late' : ''}">${esc(dates)}</span>`);
+    if (e.memo) lines.push(`<span class="sub">${esc(e.memo)}</span>`);
+    if (e.done) lines.push(`<span class="sub">達成日 ${fmtYMD(e.done)}</span>`);
+    return `<div class="erow${e.done ? ' done' : ''}">
+      <button type="button" class="echk" data-act="toggleentry" data-id="${esc(e.id)}" aria-pressed="${!!e.done}" aria-label="${esc(e.title)}を${e.done ? '未達成に戻す' : '達成にする'}"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span></button>
+      <button type="button" class="emain" data-act="editentry" data-id="${esc(e.id)}"><span class="cat">${esc(e.title)}</span>${lines.join('')}</button>
+      <span class="ept">${e.pt ? '+' + e.pt.toLocaleString('ja-JP') + ' pt' : ''}</span>
+    </div>`;
+  };
+  const group = (name, list) => list.length ? `<div class="day"><div class="dayhead"><span>${name}（${list.length}件）</span><span class="num">${sum(list) ? sum(list).toLocaleString('ja-JP') + ' pt' : ''}</span></div><div class="rows">${list.map(row).join('')}</div></div>` : '';
+  box.innerHTML = `
+    <div class="card">
+      <div class="lbl">未達成の付与ポイント</div>
+      <div class="big">${sum(open).toLocaleString('ja-JP')} pt</div>
+      <dl class="kv" style="margin-top:12px"><dt>未達成</dt><dd>${open.length}件</dd><dt>達成済み</dt><dd>${done.length}件・${sum(done).toLocaleString('ja-JP')} pt</dd></dl>
+    </div>
+    ${group('未達成', open)}${group('達成済み', done)}
+    <div style="margin-top:14px"><button type="button" class="btn" data-act="addentry" style="width:100%">＋ エントリーを追加</button></div>
+    <p class="note">左のチェックを入れると、その日が達成日として自動で入り、行がグレーになります。もう一度押すと未達成に戻ります。行をタップすると内容を編集できます。</p>`;
+}
+function openEntrySheet(item) {
+  const isNew = !item;
+  const st = item ? {title:item.title, memo:item.memo, run:item.run, due:item.due, pt:item.pt ? String(item.pt) : ''} : {title:'', memo:'', run:'', due:'', pt:''};
+  let confirming = false;
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>エントリーを${isNew ? '追加' : '編集'}</h2>${closeBtn('eClose')}</div>
+    <label class="field" style="margin-top:0"><span class="flabel">内容</span><input id="eTitle" type="text" maxlength="40" autocomplete="off" placeholder="例：ポイント2倍キャンペーン"></label>
+    <label class="field"><span class="flabel">詳細（任意）</span><textarea id="eMemo" maxlength="200" rows="3" style="min-height:84px;font-family:inherit;font-size:15px" placeholder="例：条件、対象店舗、URLなど"></textarea></label>
+    <label class="field"><span class="flabel">実行日（任意）</span><input id="eRun" type="date"></label>
+    <label class="field"><span class="flabel">期限（任意）</span><input id="eDue" type="date"></label>
+    <label class="field"><span class="flabel">付与pt（任意）</span><span class="amount"><b>pt</b><input id="ePt" type="text" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="付与pt"></span></label>
+    ${!isNew && item.done ? `<p class="note" style="margin-left:0">達成日：${esc(fmtYMD(item.done))}（一覧のチェックを外すと未達成に戻ります）</p>` : ''}
+    <div class="sheet-foot"><p class="err" id="eErr" role="alert" style="min-height:0;margin:0 0 6px"></p><div id="eActions"></div></div>`, `エントリーを${isNew ? '追加' : '編集'}`);
+  const $e = id => sheet.querySelector(id);
+  const setErr = m => { $e('#eErr').textContent = m || ''; };
+  $e('#eTitle').value = st.title; $e('#eMemo').value = st.memo; $e('#eRun').value = st.run; $e('#eDue').value = st.due; $e('#ePt').value = st.pt;
+  function save() {
+    const title = $e('#eTitle').value.trim();
+    if (!title) { setErr('内容を入力してください。'); return; }
+    const out = cleanEntry({id: isNew ? 'e' + uid() : item.id, title, memo: $e('#eMemo').value.trim(), run: $e('#eRun').value, due: $e('#eDue').value, pt: $e('#ePt').value, done: isNew ? '' : item.done, u: Date.now()});
+    S.entries = isNew ? [...S.entries, out] : S.entries.map(x => x.id === out.id ? out : x);
+    saveMeta(); closeSheet(); toast('保存しました'); render();
+  }
+  const paintActions = () => {
+    const box = $e('#eActions');
+    if (confirming) {
+      box.innerHTML = `<div class="confirm"><p><b>「${esc(item.title)}」を削除しますか？</b></p><div class="actions"><button type="button" class="btn" id="eNo">やめる</button><button type="button" class="btn danger solid primary" id="eYes">削除する</button></div></div>`;
+      box.querySelector('#eNo').onclick = () => { confirming = false; paintActions(); };
+      box.querySelector('#eYes').onclick = () => { S.entries = S.entries.filter(x => x.id !== item.id); saveMeta(); closeSheet(); toast('削除しました'); render(); };
+    } else {
+      box.innerHTML = `<div class="actions">${isNew ? '' : '<button type="button" class="btn danger" id="eDel">削除</button>'}<button type="button" class="btn primary" id="eSave">保存</button></div>`;
+      const del = box.querySelector('#eDel');
+      if (del) del.onclick = () => { confirming = true; paintActions(); };
+      box.querySelector('#eSave').onclick = save;
+    }
+  };
+  sheet.oninput = e => {
+    setErr('');
+    if (e.target.id === 'ePt') { const v = numClean(e.target.value, 0).slice(0, 9); if (e.target.value !== v) e.target.value = v; }
+  };
+  $e('#eClose').onclick = closeSheet;
+  paintActions();
+  if (isNew) setTimeout(() => { try { $e('#eTitle').focus(); } catch (err) {} }, 60);
+}
+
 /* ===== 入力シート ===== */
 function defaultDate() { const t = todayStr(); return t.slice(0,7) === ui.month ? t : ui.month + '-01'; }
 const payChips = (selected, orig) => {
@@ -1487,8 +1594,8 @@ async function exportCsv(scope) {
 
 /* ===== バックアップ ===== */
 async function exportBackup() {
-  if (!realCount() && !Object.keys(S.learn).length && !S.accts.length) { toast('バックアップする記録がありません'); return; }
-  const data = {app:'kakeibo', version:1, exportedAt:new Date().toISOString(), cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, months:S.months};
+  if (!realCount() && !Object.keys(S.learn).length && !S.accts.length && !S.entries.length) { toast('バックアップする記録がありません'); return; }
+  const data = {app:'kakeibo', version:1, exportedAt:new Date().toISOString(), cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, months:S.months};
   const d = todayStr().replace(/-/g, '');
   const r = await deliverFile(JSON.stringify(data), `kakeibo-backup-${d}.json`, 'application/json');
   if (r === 'shared' || r === 'downloaded') {
@@ -1513,13 +1620,13 @@ async function handleBackupFile(file) {
   const range = ds.length ? `${ds[0]} 〜 ${ds[ds.length-1]}` : '記録なし';
   const sheet = openSheet(`
     <div class="sheet-head"><h2>バックアップから復元</h2>${closeBtn('bClose')}</div>
-    <div class="card"><dl class="kv"><dt>記録</dt><dd>${n.toLocaleString('ja-JP')}件</dd><dt>期間</dt><dd>${esc(range)}</dd>${Array.isArray(obj.accts) ? `<dt>現資産の項目</dt><dd>${obj.accts.length}件</dd>` : ''}<dt>書き出した日時</dt><dd>${esc(obj.exportedAt ? new Date(obj.exportedAt).toLocaleString('ja-JP') : '不明')}</dd></dl></div>
+    <div class="card"><dl class="kv"><dt>記録</dt><dd>${n.toLocaleString('ja-JP')}件</dd><dt>期間</dt><dd>${esc(range)}</dd>${Array.isArray(obj.accts) ? `<dt>現資産の項目</dt><dd>${obj.accts.length}件</dd>` : ''}${Array.isArray(obj.entries) ? `<dt>エントリー</dt><dd>${obj.entries.length}件</dd>` : ''}<dt>書き出した日時</dt><dd>${esc(obj.exportedAt ? new Date(obj.exportedAt).toLocaleString('ja-JP') : '不明')}</dd></dl></div>
     ${bad ? `<p class="note">読み取れない記録が${bad}件ありました。それらは復元されません。</p>` : ''}
     <p class="err" style="min-height:0;margin-top:14px"><b>いま入っている記録${realCount().toLocaleString('ja-JP')}件は、すべてこのバックアップの内容に置き換わります。</b></p>
     <div class="sheet-foot"><div class="actions"><button type="button" class="btn" id="bNo">やめる</button><button type="button" class="btn danger solid primary" id="bYes">置き換えて復元</button></div></div>`, 'バックアップから復元');
   sheet.querySelector('#bClose').onclick = sheet.querySelector('#bNo').onclick = closeSheet;
   sheet.querySelector('#bYes').onclick = () => {
-    applyLoaded(months, {cats:obj.cats, pays:obj.pays, learn:obj.learn, accts:obj.accts, acctNames:obj.acctNames, pointNames:obj.pointNames, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+    applyLoaded(months, {cats:obj.cats, pays:obj.pays, learn:obj.learn, accts:obj.accts, acctNames:obj.acctNames, pointNames:obj.pointNames, entries:obj.entries, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
     saveAll();
     closeSheet(); toast(`${n.toLocaleString('ja-JP')}件を復元しました`); render();
   };
@@ -2467,6 +2574,9 @@ document.addEventListener('click', e => {
     case 'editpay': { const p = S.pays.find(x => x.id === el.dataset.id); if (p) openNameSheet('pay', p); break; }
     case 'addpay': openNameSheet('pay', null); break;
     case 'addacct': openAcctSheet(null); break;
+    case 'addentry': openEntrySheet(null); break;
+    case 'editentry': { const e = S.entries.find(x => x.id === el.dataset.id); if (e) openEntrySheet(e); break; }
+    case 'toggleentry': toggleEntry(el.dataset.id); break;
     case 'acctowner': ui.acctOwner = v; renderAcct(); break;
     case 'acct-refresh': refreshPrices(true); break;
     case 'acctpreset': openAcctSheet(null, el.dataset.name); break;
