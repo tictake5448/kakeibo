@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.3.5';
+const APP_VERSION = '1.4.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -36,7 +36,7 @@ const lsSet = (k,v) => { try { localStorage.setItem(k,v); } catch (e) {} };
 const cashflow = x => x.t === 'i' ? x.a : -x.a;   // 収入は+、支出は−（返金・値引きの負の支出は+になる）
 
 /* ===== 状態 ===== */
-let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
+let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
 const store = { mode: 'init', persisted: null, error: false, loaded: false };
 const ui = { tab:'home', month:curMonth(), filter:'all', q:'', aType:'e', aBy:'cat', setType:'e', lastPay:'cash', lastType:'e' };
 
@@ -99,7 +99,15 @@ async function idbLoadAll() {
   });
   return {months, meta};
 }
-const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+/* 預貯金の口座: {id, name, bal(円・0以上の整数), note, color, u(残高を更新した時刻)}。収支の記録とは別に持つ */
+function cleanAcct(a) {
+  if (!a || typeof a !== 'object') return null;
+  const bal = Math.round(Number(a.bal));
+  const name = String(a.name || '').trim().slice(0, 20);
+  if (!name || !Number.isFinite(bal) || bal < 0 || bal > 999999999999) return null;
+  return {id: String(a.id || 'a' + uid()), name, bal, note: String(a.note || '').slice(0, 30), color: String(a.color || '#8A8F98'), u: Number(a.u) || 0};
+}
 
 function cleanTx(x) {
   if (!x || typeof x !== 'object') return null;
@@ -125,6 +133,7 @@ function applyLoaded(months, meta) {
     if (meta.learn && typeof meta.learn === 'object' && !Array.isArray(meta.learn)) S.learn = meta.learn;
     S.lastBackup = Number(meta.lastBackup) || null;
     if (meta.dels && typeof meta.dels === 'object' && !Array.isArray(meta.dels)) { S.dels = {}; for (const k of Object.keys(meta.dels)) if (Number(meta.dels[k])) S.dels[k] = Number(meta.dels[k]); }
+    if (Array.isArray(meta.accts)) S.accts = meta.accts.map(cleanAcct).filter(Boolean);
     if (meta.sync && typeof meta.sync === 'object') S.sync = {url:String(meta.sync.url || ''), key:String(meta.sync.key || ''), auto:meta.sync.auto !== false, last:Number(meta.sync.last) || null};
   }
 }
@@ -656,18 +665,19 @@ const DAY = 86400000;
 
 function render() {
   renderBar();
-  for (const id of ['home','stats','set']) $('#v-' + id).hidden = ui.tab !== id;
+  for (const id of ['home','stats','acct','set']) $('#v-' + id).hidden = ui.tab !== id;
   document.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-current', b.dataset.tab === ui.tab ? 'page' : 'false'));
-  $('#fabwrap').hidden = ui.tab === 'set';
+  $('#fabwrap').hidden = ui.tab === 'set' || ui.tab === 'acct';
   if (ui.tab === 'home') { renderBanner(); renderSummary(); renderFilter(); renderList(); }
   else if (ui.tab === 'stats') renderStats();
+  else if (ui.tab === 'acct') renderAcct();
   else renderSettings();
 }
 
 function renderBar() {
   const [y,m] = ui.month.split('-').map(Number);
-  const isSet = ui.tab === 'set';
-  $('#mLabel').textContent = isSet ? '設定' : `${y}年${m}月`;
+  const isSet = ui.tab === 'set' || ui.tab === 'acct';   // 月の切り替えが要らない画面
+  $('#mLabel').textContent = ui.tab === 'set' ? '設定' : ui.tab === 'acct' ? '預貯金' : `${y}年${m}月`;
   $('#navPrev').style.visibility = $('#navNext').style.visibility = isSet ? 'hidden' : 'visible';
   $('#todayBtn').hidden = isSet || ui.month === curMonth();
 }
@@ -887,6 +897,102 @@ function renderSettings() {
       <p class="note" style="margin:8px 0 0">記録は消えません。新しい版が反映されないときに押してください。</p>
     </div>`;
 }
+/* ===== 預貯金（収入・支出とは別に、いまの残高を口座ごとに持つ） ===== */
+const ACCT_PRESETS = ['三井住友銀行','PayPay銀行','楽天銀行','ゆうちょ銀行','三菱UFJ銀行','現金（手元）'];
+function renderAcct() {
+  const box = $('#acct');
+  if (!store.loaded) { box.innerHTML = '<div class="card"><p class="muted" style="margin:0">読み込み中…</p></div>'; return; }
+  if (!S.accts.length) {
+    box.innerHTML = `
+      <div class="welcome card">
+        <h2>預貯金を登録しましょう</h2>
+        <p>銀行口座や手元の現金など、いまの残高を口座ごとに入れると、どこにいくらあるかを一覧で見られます。収入・支出の記録とは別に保存されます。</p>
+        <div class="chips">${ACCT_PRESETS.slice(0, 5).map(n => `<button type="button" class="chip" data-act="acctpreset" data-name="${esc(n)}">${esc(n)}</button>`).join('')}</div>
+        <button type="button" class="btn primary" data-act="addacct">口座を追加する</button>
+      </div>`;
+    return;
+  }
+  const list = S.accts.slice().sort((a, b) => b.bal - a.bal || a.name.localeCompare(b.name, 'ja'));
+  const total = list.reduce((sum, a) => sum + a.bal, 0);
+  const latest = Math.max(...list.map(a => a.u || 0));
+  const fmtD = u => { const d = new Date(u); return `${d.getMonth() + 1}/${d.getDate()}`; };
+  const rows = list.map(a => {
+    const pct = total > 0 ? Math.round(a.bal / total * 100) : 0;
+    const sub = [a.note, a.u ? `${fmtD(a.u)}更新` : ''].filter(Boolean).join(' · ');
+    return `<button type="button" class="row" data-act="editacct" data-id="${esc(a.id)}">
+      <i class="dot" style="background:${esc(a.color)}"></i>
+      <span class="main"><span class="cat">${esc(a.name)}</span>${sub ? `<span class="sub">${esc(sub)}</span>` : ''}</span>
+      <span class="amt">${yen(a.bal)}<small style="display:block;text-align:right;color:var(--muted);font-size:12px">${pct}%</small></span>
+      <span class="rbar" style="grid-column:1 / -1;display:block;margin-top:0"><i style="width:${a.bal > 0 ? Math.max(pct, 2) : 0}%;background:${esc(a.color)}"></i></span>
+    </button>`;
+  }).join('');
+  box.innerHTML = `
+    <div class="card">
+      <div class="lbl">預貯金の合計</div>
+      <div class="big">${yen(total)}</div>
+      <div class="meter-cap" style="margin-top:0">${list.length}口座${latest ? ` · 最終更新 ${fmtD(latest)}` : ''}</div>
+    </div>
+    <div class="section-title">口座ごとの残高</div>
+    <div class="rows">${rows}</div>
+    <div style="margin-top:10px"><button type="button" class="btn" data-act="addacct" style="width:100%">＋ 口座を追加</button></div>
+    <p class="note">残高が変わったら、その口座をタップして更新してください。ここの金額は収入・支出の記録には影響しません。</p>`;
+}
+function openAcctSheet(item, preset) {
+  const isNew = !item;
+  const d = item ? {...item} : {id:'a' + uid(), name:preset || '', bal:0, note:'', color:PAL[S.accts.length % PAL.length], u:0};
+  let confirming = false;
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>口座を${isNew ? '追加' : '編集'}</h2>${closeBtn('aClose')}</div>
+    <label class="field"><span class="flabel">口座名</span><input id="aName" type="text" maxlength="20" autocomplete="off" placeholder="例：三井住友銀行"></label>
+    ${isNew ? `<div class="chips" id="aPre" style="margin:-4px 0 12px">${ACCT_PRESETS.map(n => `<button type="button" class="chip small" data-n="${esc(n)}">${esc(n)}</button>`).join('')}</div>` : ''}
+    <label class="field"><span class="flabel">現在の残高</span><span class="amount"><b>¥</b><input id="aBal" type="text" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="現在の残高"></span></label>
+    <p class="note" id="aPrev" style="margin:-6px 4px 12px"></p>
+    <label class="field"><span class="flabel">メモ（任意）</span><input id="aNote" type="text" maxlength="30" autocomplete="off" placeholder="例：普通預金、給与振込"></label>
+    <div class="field"><span class="flabel">色</span><div class="swatches" id="aSw"></div></div>
+    ${!isNew && d.u ? `<p class="note" style="margin-left:0">残高の最終更新：${esc(new Date(d.u).toLocaleDateString('ja-JP'))}</p>` : ''}
+    <p class="err" id="aErr" role="alert"></p>
+    <div class="sheet-foot" id="aActions"></div>`, `口座を${isNew ? '追加' : '編集'}`);
+  const aName = sheet.querySelector('#aName'), aBal = sheet.querySelector('#aBal'), aNote = sheet.querySelector('#aNote');
+  const aErr = sheet.querySelector('#aErr'), aPrev = sheet.querySelector('#aPrev');
+  aName.value = d.name; aNote.value = d.note; aBal.value = isNew ? '' : String(d.bal);
+  const digitsOf = () => normDigits(aBal.value).replace(/\D/g, '').slice(0, 12);
+  const paintPrev = () => { const g = digitsOf(); aPrev.textContent = g ? '＝ ' + yen(Number(g)) : ''; };
+  const paintSw = () => { sheet.querySelector('#aSw').innerHTML = swatchesHtml(d.color); };
+  const paintActions = () => {
+    const box = sheet.querySelector('#aActions');
+    if (confirming) {
+      box.innerHTML = `<div class="confirm"><p><b>「${esc(d.name)}」を削除しますか？</b></p><div class="actions"><button type="button" class="btn" id="aNo">やめる</button><button type="button" class="btn danger solid primary" id="aYes">削除する</button></div></div>`;
+      box.querySelector('#aNo').onclick = () => { confirming = false; paintActions(); };
+      box.querySelector('#aYes').onclick = () => { S.accts = S.accts.filter(a => a.id !== d.id); saveMeta(); closeSheet(); toast('削除しました'); render(); };
+    } else {
+      box.innerHTML = `<div class="actions">${isNew ? '' : '<button type="button" class="btn danger" id="aDel">削除</button>'}<button type="button" class="btn primary" id="aSave">保存</button></div>`;
+      const del = box.querySelector('#aDel');
+      if (del) del.onclick = () => { confirming = true; paintActions(); };
+      box.querySelector('#aSave').onclick = () => {
+        const name = aName.value.trim(), g = digitsOf();
+        if (!name) { aErr.textContent = '口座名を入力してください。'; aName.focus(); return; }
+        if (S.accts.some(a => a.id !== d.id && a.name === name)) { aErr.textContent = '同じ名前の口座があります。'; return; }
+        if (!g) { aErr.textContent = '残高を入力してください（0円でも入力できます）。'; aBal.focus(); return; }
+        d.name = name; d.note = aNote.value.trim().slice(0, 30);
+        const bal = Number(g);
+        if (isNew || bal !== item.bal) d.u = Date.now();
+        d.bal = bal;
+        S.accts = isNew ? [...S.accts, d] : S.accts.map(a => a.id === d.id ? d : a);
+        saveMeta(); closeSheet(); toast('保存しました'); render();
+      };
+    }
+  };
+  sheet.querySelector('#aClose').onclick = closeSheet;
+  sheet.querySelector('#aSw').onclick = e => { const b = e.target.closest('button[data-c]'); if (!b) return; d.color = b.dataset.c; paintSw(); };
+  const pre = sheet.querySelector('#aPre');
+  if (pre) pre.onclick = e => { const b = e.target.closest('button[data-n]'); if (!b) return; aName.value = b.dataset.n; aErr.textContent = ''; aBal.focus(); };
+  aName.addEventListener('input', () => { aErr.textContent = ''; });
+  aNote.addEventListener('input', () => { aErr.textContent = ''; });
+  aBal.addEventListener('input', () => { const g = digitsOf(); if (aBal.value !== g) aBal.value = g; aErr.textContent = ''; paintPrev(); });
+  paintSw(); paintActions(); paintPrev();
+  if (isNew) setTimeout(() => { try { (aName.value ? aBal : aName).focus(); } catch (e) {} }, 60);
+}
+
 /* ===== 入力シート ===== */
 function defaultDate() { const t = todayStr(); return t.slice(0,7) === ui.month ? t : ui.month + '-01'; }
 const payChips = (selected, orig) => {
@@ -1098,8 +1204,8 @@ async function exportCsv(scope) {
 
 /* ===== バックアップ ===== */
 async function exportBackup() {
-  if (!realCount() && !Object.keys(S.learn).length) { toast('バックアップする記録がありません'); return; }
-  const data = {app:'kakeibo', version:1, exportedAt:new Date().toISOString(), cats:S.cats, pays:S.pays, learn:S.learn, months:S.months};
+  if (!realCount() && !Object.keys(S.learn).length && !S.accts.length) { toast('バックアップする記録がありません'); return; }
+  const data = {app:'kakeibo', version:1, exportedAt:new Date().toISOString(), cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, months:S.months};
   const d = todayStr().replace(/-/g, '');
   const r = await deliverFile(JSON.stringify(data), `kakeibo-backup-${d}.json`, 'application/json');
   if (r === 'shared' || r === 'downloaded') {
@@ -1124,13 +1230,13 @@ async function handleBackupFile(file) {
   const range = ds.length ? `${ds[0]} 〜 ${ds[ds.length-1]}` : '記録なし';
   const sheet = openSheet(`
     <div class="sheet-head"><h2>バックアップから復元</h2>${closeBtn('bClose')}</div>
-    <div class="card"><dl class="kv"><dt>記録</dt><dd>${n.toLocaleString('ja-JP')}件</dd><dt>期間</dt><dd>${esc(range)}</dd><dt>書き出した日時</dt><dd>${esc(obj.exportedAt ? new Date(obj.exportedAt).toLocaleString('ja-JP') : '不明')}</dd></dl></div>
+    <div class="card"><dl class="kv"><dt>記録</dt><dd>${n.toLocaleString('ja-JP')}件</dd><dt>期間</dt><dd>${esc(range)}</dd>${Array.isArray(obj.accts) ? `<dt>預貯金の口座</dt><dd>${obj.accts.length}件</dd>` : ''}<dt>書き出した日時</dt><dd>${esc(obj.exportedAt ? new Date(obj.exportedAt).toLocaleString('ja-JP') : '不明')}</dd></dl></div>
     ${bad ? `<p class="note">読み取れない記録が${bad}件ありました。それらは復元されません。</p>` : ''}
     <p class="err" style="min-height:0;margin-top:14px"><b>いま入っている記録${realCount().toLocaleString('ja-JP')}件は、すべてこのバックアップの内容に置き換わります。</b></p>
     <div class="sheet-foot"><div class="actions"><button type="button" class="btn" id="bNo">やめる</button><button type="button" class="btn danger solid primary" id="bYes">置き換えて復元</button></div></div>`, 'バックアップから復元');
   sheet.querySelector('#bClose').onclick = sheet.querySelector('#bNo').onclick = closeSheet;
   sheet.querySelector('#bYes').onclick = () => {
-    applyLoaded(months, {cats:obj.cats, pays:obj.pays, learn:obj.learn, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+    applyLoaded(months, {cats:obj.cats, pays:obj.pays, learn:obj.learn, accts:obj.accts, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
     saveAll();
     closeSheet(); toast(`${n.toLocaleString('ja-JP')}件を復元しました`); render();
   };
@@ -2077,6 +2183,9 @@ document.addEventListener('click', e => {
     case 'addcat': openNameSheet('cat', null, ui.setType); break;
     case 'editpay': { const p = S.pays.find(x => x.id === el.dataset.id); if (p) openNameSheet('pay', p); break; }
     case 'addpay': openNameSheet('pay', null); break;
+    case 'addacct': openAcctSheet(null); break;
+    case 'acctpreset': openAcctSheet(null, el.dataset.name); break;
+    case 'editacct': { const a = S.accts.find(x => x.id === el.dataset.id); if (a) openAcctSheet(a); break; }
     case 'receipt': openReceiptChoice(); break;
     case 'import-csv': $('#fileCsv').click(); break;
     case 'backup': exportBackup(); break;
