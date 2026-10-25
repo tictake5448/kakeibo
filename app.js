@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.5.1';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -1074,8 +1074,7 @@ function openAcctSheet(item, preset) {
     <label class="field"><span class="flabel">メモ（任意）</span><input id="aNote" type="text" maxlength="30" autocomplete="off" placeholder="例：普通預金、NISA、取引所名"></label>
     <div class="field"><span class="flabel">色</span><div class="swatches" id="aSw"></div></div>
     ${!isNew && d.u ? `<p class="note" style="margin-left:0">最終更新：${esc(new Date(d.u).toLocaleDateString('ja-JP'))}</p>` : ''}
-    <p class="err" id="aErr" role="alert"></p>
-    <div class="sheet-foot" id="aActions"></div>`, `資産を${isNew ? '追加' : '編集'}`);
+    <div class="sheet-foot"><p class="err" id="aErr" role="alert" style="min-height:0;margin:0 0 6px"></p><div id="aActions"></div></div>`, `資産を${isNew ? '追加' : '編集'}`);
   const $a = id => sheet.querySelector(id);
   const setErr = m => { $a('#aErr').textContent = m || ''; };
   $a('#aNote').value = st.note;
@@ -1157,9 +1156,6 @@ function openAcctSheet(item, preset) {
       } else if (st.price !== '' && Number.isFinite(p) && p > 0 && (!S.prices[k] || S.prices[k].p !== p)) {
         S.prices[k] = {p, t: Date.now(), manual: true};   // 取得できないときの手入力
       }
-    }
-    if (S.accts.some(a => a.id !== d.id && a.name === out.name && a.owner === out.owner && a.kind === out.kind)) {
-      setErr('同じ持ち主・同じ名前の資産があります。メモで区別するか、既存の資産を更新してください。'); return;
     }
     const changed = isNew || out.bal !== item.bal || out.qty !== item.qty || out.price !== item.price;
     if (changed) out.u = Date.now();
