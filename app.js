@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.3.3';
+const APP_VERSION = '1.3.4';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -341,6 +341,8 @@ function fixNumToken(tok) {
 function normLine(raw) {
   let s = String(raw).normalize('NFKC');
   s = s.replace(/[−‐-―]/g, '-').replace(/[▲△]\s*(?=[¥\\]?\d)/g, '-');
+  // 「¥」が「$」「·」「*」に化けた「金額だけの行」を直す（例: 「·279」「$498」「·62)」）。「#」は桁区切り付きのときだけ（レジ番号と区別するため）
+  s = s.replace(/^[·•・$*]\s?((?:\d{1,3}(?:,\s?\d{3})+|[1-9]\d*))\)?$/, '¥$1').replace(/^#\s?(\d{1,3}(?:,\s?\d{3})+)\)?$/, '¥$1');
   s = s.replace(/\\/g, '¥');
   s = s.replace(/([^A-Za-z\d]|^)[Yy]{1,2}(?=\s?¥?\d)/g, '$1¥').replace(/¥{2,}/g, '¥');
   for (let i = 0; i < 3; i++) s = s.replace(/(\d)\s?[.,。、]\s?(\d{3})(?!\d)/g, '$1$2');
@@ -394,6 +396,7 @@ function matchItem(l) {
 function isStoreLine(l) {
   if (HEADER_RE.test(l) || findDate(l, new Date())) return false;
   if (/^[\d\s\-¥,.:]+$/.test(l)) return false;
+  if (/JAN|\d{8,}/.test(l)) return false;                                  // 「4984969010552JAN」のような商品コード行
   if (/[都道府県市区町村郡].*\d/.test(l) || /^〒/.test(l)) return false;
   const letters = (l.match(/[A-Za-z぀-ヿ㐀-鿿]/g) || []).length;
   return letters >= 2 && l.length <= 30;
@@ -423,7 +426,13 @@ function detectPay(text) {
 function parseReceipt(text, now) {
   now = now || new Date();
   const lines = [];
-  const rawLines = String(text).split(/\r?\n/).map(normLine).filter(Boolean);
+  const joined = [];
+  for (const l of String(text).split(/\r?\n/).map(x => x.trim()).filter(Boolean)) {
+    const prev = joined[joined.length - 1];
+    if (prev !== undefined && /\d[,，]\s?$/.test(prev) && /^\d{3}(?!\d)/.test(l)) joined[joined.length - 1] = prev + l;
+    else joined.push(l);
+  }
+  const rawLines = joined.map(normLine).filter(Boolean);
   const isPriceOnly = l => { const m = l.match(/^¥?\s?-?\s?¥?(\d{1,7})$/); return !!m && (l.includes('¥') || (m[1].length >= 3 && m[1][0] !== '0')); };   // 「00978」のような番号は金額ではない
   const kind = rawLines.map(l => isPriceOnly(l) ? 'P' : (hasLetter(l) && !lastAmount(l) && l.length <= 40 ? 'L' : 'O'));
   for (let i = 0; i < rawLines.length; i++) {                      // 「品名」の次の行が金額だけのとき（文字認識が列を分けて出す場合）は1行にする
@@ -445,6 +454,10 @@ function parseReceipt(text, now) {
   if (si >= 0) lines[si] = lines[si].replace(/^店名\s*[:：]\s*/, '');
   for (let i = 1; i < Math.min(lines.length, 16) && si < 0; i++) {                // 電話番号の行の直前が店名のことが多い
     if (/(TEL|Tel|電話|\d{2,4}-\d{2,4}-\d{3,4})/.test(lines[i])) {
+      const pre = lines[i].replace(/(TEL|Tel|電話)?[\s.:：]*\d{2,4}-\d{2,4}-\d{3,4}.*$/, '').trim();   // 「広島商工センター店082-270-3368」→「広島商工センター店」
+      if (pre && pre !== lines[i] && cjkN(pre) >= 3 && isStoreLine(pre)) { lines[i] = pre; si = i; break; }
+      for (let j = i - 1; j >= Math.max(0, i - 5) && si < 0; j--) if (/店$/.test(lines[j]) && isStoreLine(lines[j]) && cjkN(lines[j]) >= 3) si = j;   // 住所行をはさんでいても「〜店」を優先
+      if (si >= 0) break;
       for (let j = i - 1; j >= Math.max(0, i - 2); j--) if (isStoreLine(lines[j]) && cjkN(lines[j]) >= 3) { si = j; break; }
       break;
     }
@@ -483,7 +496,18 @@ function parseReceipt(text, now) {
       if (pm && isPriceOnly(l)) prices.push({amount:Number(pm[2]), neg:pm[1] === '-'});
       else if (hasLetter(l) && !lastAmount(l) && l.length <= 30 && (l.match(/[A-Za-z぀-ヿ㐀-鿿]/g) || []).length >= 2) names.push(l);
     }
-    if (prices.length >= 2 && names.length >= 2 && Math.abs(names.length - prices.length) <= 1) {
+    if (prices.length >= 3) {                                   // 最後の金額が、その前の金額の合計と同じなら小計の重複表示なので除く
+      const last = prices[prices.length - 1];
+      const rest = prices.slice(0, -1).reduce((a, p) => a + (p.neg ? -p.amount : p.amount), 0);
+      if (!last.neg && last.amount === rest) prices.pop();
+    }
+    if (names.length > prices.length) {                         // 「◆」などで始まらない行は前の品名の折り返しとみなして結合
+      const merged = [];
+      for (const l of names) { if (merged.length && !/^[*＊・●○◆◇▪※★☆]/.test(l)) merged[merged.length - 1] += l; else merged.push(l); }
+      if (merged.length === prices.length) { names.length = 0; names.push(...merged); }
+    }
+    // 品名と金額の数が合わないときは、ずれた組み合わせを作らない（3件以下のときだけ従来どおり1件の差を許す）
+    if (prices.length >= 2 && names.length >= 2 && (names.length === prices.length || (prices.length <= 3 && Math.abs(names.length - prices.length) <= 1))) {
       const n = Math.min(names.length, prices.length), items = [];
       for (let i = 0; i < n; i++) items.push({label:names[i], amount:prices[i].amount, neg:prices[i].neg || DISC_RE.test(names[i])});
       if (items.length > info.items.length) info.items = items;
@@ -496,6 +520,12 @@ function parseReceipt(text, now) {
         if (la && la.amount >= 10) { info.total = la.amount; break; }
       }
     }
+  }
+  if (info.total === null && info.items.length) {               // 合計行の金額が離れて読まれた場合: 品目の合計と同じ金額がほかにあれば、それを合計とする
+    const sum = info.items.reduce((a, it) => a + (it.neg ? -it.amount : it.amount), 0);
+    const yens = new Set();
+    for (const l of lines) for (const m of l.matchAll(/¥\s?(\d{1,7})/g)) yens.add(Number(m[1]));
+    if (sum > 0 && yens.has(sum)) info.total = sum;
   }
   return info;
 }
