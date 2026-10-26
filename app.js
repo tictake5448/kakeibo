@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.8.1';
+const APP_VERSION = '1.9.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -759,6 +759,15 @@ function renderBar() {
   const isSet = ui.tab === 'set' || ui.tab === 'acct' || ui.tab === 'entry';   // 月の切り替えが要らない画面
   $('#mLabel').textContent = ui.tab === 'set' ? '設定' : ui.tab === 'acct' ? '現資産' : ui.tab === 'entry' ? 'エントリー' : `${y}年${m}月`;
   $('#navPrev').style.visibility = $('#navNext').style.visibility = isSet ? 'hidden' : 'visible';
+  const nx = $('#navNext'), isEntry = ui.tab === 'entry';
+  if (nx.dataset.mode !== (isEntry ? 'add' : 'next')) {
+    if (!nx.dataset.orig) nx.dataset.orig = nx.innerHTML;
+    nx.dataset.mode = isEntry ? 'add' : 'next';
+    nx.innerHTML = isEntry ? '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>' : nx.dataset.orig;
+    nx.dataset.act = isEntry ? 'addentry' : 'next';
+    nx.setAttribute('aria-label', isEntry ? 'エントリーを追加' : '次の月');
+  }
+  if (isEntry) nx.style.visibility = 'visible';
   $('#todayBtn').hidden = isSet || ui.month === curMonth();
 }
 
@@ -1290,42 +1299,38 @@ function renderEntries() {
   const box = $('#entry');
   if (!store.loaded) { box.innerHTML = '<div class="card"><p class="muted" style="margin:0">読み込み中…</p></div>'; return; }
   if (!S.entries.length) {
-    box.innerHTML = `<div class="welcome card"><h2>エントリーを登録しましょう</h2><p>キャンペーンなどの「実行日・期限・内容・付与pt」を登録し、済んだものにチェックを入れると達成日が自動で入り、行がグレーになります。</p><button type="button" class="btn primary" data-act="addentry">エントリーを追加する</button></div>`;
+    box.innerHTML = `<div class="welcome card"><h2>エントリーを登録しましょう</h2><p>キャンペーンなどの「実行日・期限・内容・付与pt」を登録し、済んだものにチェックを入れると達成日が自動で入り、行がグレーになります。右上の「＋」からも追加できます。</p><button type="button" class="btn primary" data-act="addentry">エントリーを追加する</button></div>`;
     return;
   }
   const today = todayStr();
-  const cmp = (a, b) => (a || '9999-99-99') < (b || '9999-99-99') ? -1 : (a || '9999-99-99') > (b || '9999-99-99') ? 1 : 0;
+  const key = v => v || '9999-99-99';
+  const cmp = (a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0;
   const open = S.entries.filter(e => !e.done).sort((a, b) => cmp(a.due, b.due) || cmp(a.run, b.run) || a.u - b.u);
   const done = S.entries.filter(e => e.done).sort((a, b) => cmp(b.done, a.done));
   const sum = l => l.reduce((s, e) => s + e.pt, 0);
+  const pt = n => n.toLocaleString('ja-JP');
   const row = e => {
-    const late = entryAlert(e, today);
-    let dueTxt = '';
-    if (e.due) {
-      const left = daysBetween(today, e.due);
-      dueTxt = `期限 ${fmtYMD(e.due)}` + (e.done ? '' : e.due < today ? '（期限切れ）' : left === 0 ? '（今日まで）' : left <= 7 ? `（あと${left}日）` : '');
-    }
-    const lines = [];
-    const dates = [e.run ? `実行日 ${fmtYMD(e.run)}` : '', dueTxt].filter(Boolean).join(' ／ ');
-    if (dates) lines.push(`<span class="sub${late ? ' late' : ''}">${esc(dates)}</span>`);
-    if (e.memo) lines.push(`<span class="sub">${esc(e.memo)}</span>`);
-    if (e.done) lines.push(`<span class="sub">達成日 ${fmtYMD(e.done)}</span>`);
-    return `<div class="erow${e.done ? ' done' : ''}">
-      <button type="button" class="echk" data-act="toggleentry" data-id="${esc(e.id)}" aria-pressed="${!!e.done}" aria-label="${esc(e.title)}を${e.done ? '未達成に戻す' : '達成にする'}"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span></button>
-      <button type="button" class="emain" data-act="editentry" data-id="${esc(e.id)}"><span class="cat${late ? ' alert' : ''}">${esc(e.title)}</span>${lines.join('')}</button>
-      <span class="ept">${e.pt ? '+' + e.pt.toLocaleString('ja-JP') + ' pt' : ''}</span>
+    const runHit = !e.done && e.run && e.run <= today, dueHit = !e.done && e.due && e.due <= today;
+    const cell = (cls, txt) => `<span class="ec ${cls}">${txt ? esc(txt) : ''}</span>`;
+    return `<div class="etr${e.done ? ' done' : ''}" role="row" data-act="editentry" data-id="${esc(e.id)}">
+      <span class="ec c-chk"><button type="button" class="echk" data-act="toggleentry" data-id="${esc(e.id)}" aria-pressed="${!!e.done}" aria-label="${esc(e.title)}を${e.done ? '未達成に戻す' : '達成にする'}"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span></button></span>
+      ${cell('c-run' + (runHit ? ' hit' : ''), e.run ? fmtYMD(e.run) : '')}
+      ${cell('c-due' + (dueHit ? ' hit' : ''), e.due ? fmtYMD(e.due) : '')}
+      <span class="ec c-title${runHit || dueHit ? ' alert' : ''}"><button type="button" class="elink" data-act="editentry" data-id="${esc(e.id)}">${esc(e.title)}</button></span>
+      ${cell('c-memo', e.memo)}
+      ${cell('c-pt', e.pt ? '+' + pt(e.pt) + ' pt' : '')}
+      ${cell('c-done', e.done ? fmtYMD(e.done) : '')}
     </div>`;
   };
-  const group = (name, list) => list.length ? `<div class="day"><div class="dayhead"><span>${name}（${list.length}件）</span><span class="num">${sum(list) ? sum(list).toLocaleString('ja-JP') + ' pt' : ''}</span></div><div class="rows">${list.map(row).join('')}</div></div>` : '';
   box.innerHTML = `
-    <div class="card">
-      <div class="lbl">未達成の付与ポイント</div>
-      <div class="big">${sum(open).toLocaleString('ja-JP')} pt</div>
-      <dl class="kv" style="margin-top:12px"><dt>未達成</dt><dd>${open.length}件</dd><dt>達成済み</dt><dd>${done.length}件・${sum(done).toLocaleString('ja-JP')} pt</dd></dl>
+    <div class="esum"><span>未達成 <b>${open.length}件</b>・<b>${pt(sum(open))} pt</b></span><span>達成済み <b>${done.length}件</b>・<b>${pt(sum(done))} pt</b></span></div>
+    <div class="escroll" role="table" aria-label="エントリー一覧">
+      <div class="etable">
+        <div class="etr ehead" role="row"><span class="ec c-chk"><span class="sr">達成</span></span><span class="ec c-run">実行日</span><span class="ec c-due">期限</span><span class="ec c-title">内容</span><span class="ec c-memo">詳細</span><span class="ec c-pt">付与pt</span><span class="ec c-done">達成日</span></div>
+        ${open.map(row).join('')}${done.map(row).join('')}
+      </div>
     </div>
-    ${group('未達成', open)}${group('達成済み', done)}
-    <div style="margin-top:14px"><button type="button" class="btn" data-act="addentry" style="width:100%">＋ エントリーを追加</button></div>
-    <p class="note">左のチェックを入れると、その日が達成日として自動で入り、行がグレーになります。もう一度押すと未達成に戻ります。行をタップすると内容を編集できます。</p>`;
+    <p class="note">左のチェックで達成日が自動で入り、行がグレーになります（もう一度押すと戻ります）。行をタップすると編集できます。表は左右にスクロールできます。右上の「＋」で追加します。</p>`;
 }
 function openEntrySheet(item) {
   const isNew = !item;

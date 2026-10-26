@@ -242,8 +242,27 @@ textarea{min-height:160px;font-family:var(--font-num);font-size:13px;line-height
 .emain .sub{display:block;color:var(--muted);font-size:12.5px;overflow-wrap:anywhere}
 .emain .sub.late{color:var(--expense);font-weight:600}
 .ept{font-family:var(--font-num);font-weight:600;white-space:nowrap;color:var(--accent)}
-.erow.done{opacity:.45}
-.erow.done .ept{color:var(--muted)}
 .tab{position:relative}
 .tbadge{position:absolute;top:4px;left:calc(50% + 6px);min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:#D93025;color:#fff;font-style:normal;font-size:11px;font-weight:700;line-height:17px;text-align:center;box-sizing:border-box}
 .erow:not(.done) .cat.alert::before{content:"";display:inline-block;width:9px;height:9px;margin-right:6px;border-radius:50%;background:#D93025;vertical-align:1px}
+
+/* エントリー（表形式・横スクロール） */
+.esum{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 12px;padding:6px 4px 10px;font-size:13px;color:var(--muted)}
+.esum b{color:var(--ink);font-weight:700}
+.escroll{overflow-x:auto;-webkit-overflow-scrolling:touch;background:var(--surface);border:1px solid var(--line);border-radius:14px}
+.etable{min-width:max-content}
+.etr{display:grid;grid-template-columns:52px 84px 84px 190px 260px 124px 84px;align-items:center;border-top:1px solid var(--line);cursor:pointer}
+.etr.ehead{cursor:default;border-top:0;position:sticky;top:0;color:var(--muted);font-size:12px;font-weight:700;background:var(--bg)}
+.etr .ec{padding:10px 8px;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.etr .c-chk{position:sticky;left:0;z-index:1;background:var(--surface);padding:0;display:flex;justify-content:center}
+.etr.ehead .c-chk{background:var(--bg)}
+.etr .c-pt{text-align:right;font-family:var(--font-num);font-weight:600;color:var(--accent)}
+.etr.ehead .c-pt{font-family:inherit;color:var(--muted)}
+.etr .c-memo,.etr .c-done{color:var(--muted)}
+.etr .hit{color:var(--expense);font-weight:700}
+.etr .elink{display:block;max-width:100%;padding:0;margin:0;border:0;background:none;color:inherit;font:inherit;font-weight:600;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.etr .c-title.alert::before{content:"";display:inline-block;width:9px;height:9px;margin-right:6px;border-radius:50%;background:#D93025;vertical-align:1px}
+.etr .c-title{display:flex;align-items:center}
+.etr.done .ec:not(.c-chk){opacity:.45}
+.etr.done .c-chk .echk{opacity:.6}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
