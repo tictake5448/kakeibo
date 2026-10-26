@@ -9,6 +9,9 @@
  *  A:ID  B:日付  C:種別(支出/収入)  D:分類  E:金額  F:支払方法  G:メモ
  *  H:更新(自動)  I:削除(1で削除)  J:分類ID  K:支払ID
  * シートで直接直したとき、H列は自動で更新されます（onEdit）。
+ *
+ * 「資産・エントリー」シート（アプリの現資産・エントリーを端末どうしで共有するための保管場所。手で編集しないでください）
+ *  A:区分(acct/entry/list)  B:ID  C:データ(JSON)  D:更新  E:削除(1で削除)
  */
 
 // ★ここを書き換える（アプリの設定画面にも同じものを入れる）
@@ -16,12 +19,14 @@ const KEY = 'ここを自分だけの合言葉に書き換える';
 
 const TX_SHEET = '記録';
 const SET_SHEET = '設定';
+const IT_SHEET = '資産・エントリー';
+const IT_HEAD = ['区分', 'ID', 'データ(JSON)', '更新', '削除'];
 const TX_HEAD = ['ID', '日付', '種別', '分類', '金額', '支払方法', 'メモ', '更新(自動)', '削除', '分類ID', '支払ID'];
 const SET_HEAD = ['区分', 'ID', '種別', '名前', '色'];
 const NCOL = TX_HEAD.length;
 
 function doGet() {
-  return out_({ok: true, app: 'kakeibo-sync', version: 1});
+  return out_({ok: true, app: 'kakeibo-sync', version: 2});
 }
 
 function doPost(e) {
@@ -67,7 +72,15 @@ function ensureSheets_() {
     st.getRange('A:E').setNumberFormat('@');
     st.setFrozenRows(1);
   }
-  return {tx: tx, st: st, tz: ss.getSpreadsheetTimeZone()};
+  let it = ss.getSheetByName(IT_SHEET);
+  if (!it) {
+    it = ss.insertSheet(IT_SHEET);
+    it.getRange(1, 1, 1, IT_HEAD.length).setValues([IT_HEAD]).setFontWeight('bold');
+    it.getRange('A:E').setNumberFormat('@');
+    it.setFrozenRows(1);
+    it.setColumnWidth(3, 360);
+  }
+  return {tx: tx, st: st, it: it, tz: ss.getSpreadsheetTimeZone()};
 }
 
 /* ---------- 値の整形 ---------- */
@@ -162,11 +175,70 @@ function sync_(req) {
     else if (r[0] === '支払方法') settings.pays.push({id: str_(r[1]), name: str_(r[3]), color: str_(r[4])});
   });
 
+  const itemRes = items_(sh, req);
   return {
     ok: true, now: now,
     rows: rows.filter(function (row) { return row.o; }).map(function (row) { return row.o; }),
-    settings: settings
+    settings: settings,
+    items: itemRes.items, lists: itemRes.lists
   };
+}
+
+/* ---------- 現資産・エントリー（1件ずつ、更新が新しい方を採用。名前の一覧は和集合） ---------- */
+function items_(sh, req) {
+  const n = sh.it.getLastRow() - 1;
+  const raw = n > 0 ? sh.it.getRange(2, 1, n, IT_HEAD.length).getValues() : [];
+  const map = {}, order = [];
+  const lists = {acctNames: [], pointNames: []};
+  raw.forEach(function (r) {
+    const k = str_(r[0]).trim(), id = str_(r[1]).trim();
+    if (!k || !id) return;
+    if (k === 'list') {
+      if (lists[id]) { try { lists[id] = JSON.parse(str_(r[2])); } catch (e) {} }
+      return;
+    }
+    const key = k + ':' + id;
+    const x = str_(r[4]).trim();
+    map[key] = {k: k, id: id, d: str_(r[2]), m: Number(r[3]) || 0, x: x !== '' && x !== '0' ? 1 : 0};
+    order.push(key);
+  });
+  (req.items || []).forEach(function (c) {
+    if (!c || !c.id || (c.k !== 'acct' && c.k !== 'entry')) return;
+    const key = c.k + ':' + String(c.id);
+    const m = Number(c.m) || 0;
+    const cur = map[key];
+    if (c.x) {
+      if (cur && m >= cur.m) { cur.x = 1; cur.m = m; }   // 削除は内容を残したまま「削除」印だけ付ける
+      return;                                              // 知らない記録の削除は無視
+    }
+    if (!c.d || typeof c.d !== 'object') return;
+    const json = JSON.stringify(c.d);
+    if (json.length > 5000) return;
+    if (!cur) { map[key] = {k: c.k, id: String(c.id), d: json, m: m, x: 0}; order.push(key); }
+    else if (m >= cur.m) { cur.d = json; cur.m = m; cur.x = 0; }
+  });
+  const lr = req.lists || {};
+  ['acctNames', 'pointNames'].forEach(function (name) {
+    const add = Array.isArray(lr[name]) ? lr[name] : [];
+    const seen = {}, merged = [];
+    (Array.isArray(lists[name]) ? lists[name] : []).concat(add).forEach(function (v) {
+      const s = str_(v).trim().slice(0, 20);
+      if (s && !seen[s]) { seen[s] = 1; merged.push(s); }
+    });
+    lists[name] = merged.slice(-40);
+  });
+  const lines = order.map(function (key) { const o = map[key]; return [o.k, o.id, o.d, o.m, o.x ? '1' : '']; });
+  Object.keys(lists).forEach(function (name) { lines.push(['list', name, JSON.stringify(lists[name]), 0, '']); });
+  const last = sh.it.getLastRow();
+  if (last > 1) sh.it.getRange(2, 1, last - 1, IT_HEAD.length).clearContent();
+  if (lines.length) sh.it.getRange(2, 1, lines.length, IT_HEAD.length).setValues(lines);
+  const items = order.map(function (key) {
+    const o = map[key];
+    let d = null;
+    if (!o.x) { try { d = JSON.parse(o.d); } catch (e) { d = null; } }
+    return {k: o.k, id: o.id, m: o.m, x: o.x, d: d};
+  });
+  return {items: items, lists: lists};
 }
 
 /* ---------- シートを直接編集したとき：更新日時とIDを自動で付ける ---------- */

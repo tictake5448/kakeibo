@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.10.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -36,7 +36,7 @@ const lsSet = (k,v) => { try { localStorage.setItem(k,v); } catch (e) {} };
 const cashflow = x => x.t === 'i' ? x.a : -x.a;   // 収入は+、支出は−（返金・値引きの負の支出は+になる）
 
 /* ===== 状態 ===== */
-let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], pointNames: [], entries: [], prices: {}, recSkips: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
+let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], pointNames: [], entries: [], idels: {}, prices: {}, recSkips: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
 const store = { mode: 'init', persisted: null, error: false, loaded: false };
 const ui = { acctOwner:'all', tab:'home', month:curMonth(), filter:'all', q:'', aType:'e', aBy:'cat', setType:'e', lastPay:'cash', lastType:'e' };
 
@@ -99,7 +99,7 @@ async function idbLoadAll() {
   });
   return {months, meta};
 }
-const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, prices:S.prices, recSkips:S.recSkips, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, idels:S.idels, prices:S.prices, recSkips:S.recSkips, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
 /* エントリー: {id, run(実行日), due(期限), title(内容), memo(詳細), pt(付与pt), done(達成日。空なら未達成), u} */
 function cleanEntry(e) {
   if (!e || typeof e !== 'object') return null;
@@ -116,7 +116,7 @@ function cleanAcct(a) {
   const owner = Object.prototype.hasOwnProperty.call(OWNERS, a.owner) ? a.owner : '';
   let name = String(a.name || '').trim().slice(0, 20);
   if (!name) { if (COINS[kind]) name = COINS[kind].name; else return null; }
-  const out = {id: String(a.id || 'a' + uid()), kind, owner, name, bal: 0, qty: 0, price: 0, note: String(a.note || '').slice(0, 30), color: String(a.color || '#8A8F98'), u: Number(a.u) || 0};
+  const out = {id: String(a.id || 'a' + uid()), kind, owner, name, bal: 0, qty: 0, price: 0, note: String(a.note || '').slice(0, 30), color: String(a.color || '#8A8F98'), u: Number(a.u) || 0, m: Number(a.m) || 0};
   if (kind === 'cash' || kind === 'point') {
     const bal = Math.round(Number(a.bal));
     if (!Number.isFinite(bal) || bal < 0 || bal > 999999999999) return null;
@@ -161,6 +161,7 @@ function applyLoaded(months, meta) {
     if (meta.dels && typeof meta.dels === 'object' && !Array.isArray(meta.dels)) { S.dels = {}; for (const k of Object.keys(meta.dels)) if (Number(meta.dels[k])) S.dels[k] = Number(meta.dels[k]); }
     if (Array.isArray(meta.accts)) S.accts = meta.accts.map(cleanAcct).filter(Boolean);
     if (meta.recSkips && typeof meta.recSkips === 'object' && !Array.isArray(meta.recSkips)) { S.recSkips = {}; for (const k of Object.keys(meta.recSkips).slice(-3000)) S.recSkips[k] = 1; }
+    if (meta.idels && typeof meta.idels === 'object' && !Array.isArray(meta.idels)) { S.idels = {}; for (const k of Object.keys(meta.idels).slice(0, 2000)) { const v = meta.idels[k]; if (v && (v.k === 'acct' || v.k === 'entry') && Number(v.t)) S.idels[k] = {k: v.k, t: Number(v.t)}; } }
     if (Array.isArray(meta.entries)) S.entries = meta.entries.map(cleanEntry).filter(Boolean).slice(0, 2000);
     if (Array.isArray(meta.pointNames)) S.pointNames = meta.pointNames.map(x => String(x).trim().slice(0, 20)).filter(Boolean).slice(0, 40);
     if (Array.isArray(meta.acctNames)) S.acctNames = meta.acctNames.map(x => String(x).trim().slice(0, 20)).filter(Boolean).slice(0, 40);
@@ -1196,7 +1197,7 @@ function openAcctSheet(item, preset) {
     if (confirming) {
       box.innerHTML = `<div class="confirm"><p><b>「${esc(d.name)}」を削除しますか？</b></p><div class="actions"><button type="button" class="btn" id="aNo">やめる</button><button type="button" class="btn danger solid primary" id="aYes">削除する</button></div></div>`;
       box.querySelector('#aNo').onclick = () => { confirming = false; paintActions(); };
-      box.querySelector('#aYes').onclick = () => { S.accts = S.accts.filter(a => a.id !== d.id); saveMeta(); closeSheet(); toast('削除しました'); render(); };
+      box.querySelector('#aYes').onclick = () => { S.accts = S.accts.filter(a => a.id !== d.id); S.idels[d.id] = {k:'acct', t:Date.now()}; saveMeta(); scheduleSync(); closeSheet(); toast('削除しました'); render(); };
     } else {
       box.innerHTML = `<div class="actions">${isNew ? '' : '<button type="button" class="btn danger" id="aDel">削除</button>'}<button type="button" class="btn primary" id="aSave">保存</button></div>`;
       const del = box.querySelector('#aDel');
@@ -1231,13 +1232,14 @@ function openAcctSheet(item, preset) {
         S.prices[k] = {p, t: Date.now(), manual: true};   // 取得できないときの手入力
       }
     }
+    out.m = Date.now();
     const changed = isNew || out.bal !== item.bal || out.qty !== item.qty || out.price !== item.price;
     if (changed) out.u = Date.now();
     if (isNamed(k) && st.nameSel === '+' && !namesFor(k).includes(out.name)) {                                              // 次回から一覧に出る
       if (k === 'point') S.pointNames = [...S.pointNames, out.name].slice(-40); else S.acctNames = [...S.acctNames, out.name].slice(-40);
     }
     S.accts = isNew ? [...S.accts, out] : S.accts.map(a => a.id === out.id ? out : a);
-    saveMeta(); closeSheet(); toast('保存しました'); render();
+    saveMeta(); scheduleSync(); closeSheet(); toast('保存しました'); render();
   }
   sheet.onclick = e => {
     const t = e.target;
@@ -1292,8 +1294,8 @@ function toggleEntry(id) {
   const e = S.entries.find(x => x.id === id); if (!e) return;
   const was = e.done;
   e.done = was ? '' : todayStr(); e.u = Date.now();
-  saveMeta(); renderEntries(); updateEntryBadge();
-  toast(was ? '未達成に戻しました' : `達成しました${e.pt ? `（${e.pt.toLocaleString('ja-JP')} pt）` : ''}`, {action:'元に戻す', fn: () => { e.done = was; e.u = Date.now(); saveMeta(); renderEntries(); updateEntryBadge(); }});
+  saveMeta(); scheduleSync(); renderEntries(); updateEntryBadge();
+  toast(was ? '未達成に戻しました' : `達成しました${e.pt ? `（${e.pt.toLocaleString('ja-JP')} pt）` : ''}`, {action:'元に戻す', fn: () => { e.done = was; e.u = Date.now(); saveMeta(); scheduleSync(); renderEntries(); updateEntryBadge(); }});
 }
 function renderEntries() {
   const box = $('#entry');
@@ -1353,14 +1355,14 @@ function openEntrySheet(item) {
     if (!title) { setErr('内容を入力してください。'); return; }
     const out = cleanEntry({id: isNew ? 'e' + uid() : item.id, title, memo: $e('#eMemo').value.trim(), run: $e('#eRun').value, due: $e('#eDue').value, pt: $e('#ePt').value, done: isNew ? '' : item.done, u: Date.now()});
     S.entries = isNew ? [...S.entries, out] : S.entries.map(x => x.id === out.id ? out : x);
-    saveMeta(); closeSheet(); toast('保存しました'); render();
+    saveMeta(); scheduleSync(); closeSheet(); toast('保存しました'); render();
   }
   const paintActions = () => {
     const box = $e('#eActions');
     if (confirming) {
       box.innerHTML = `<div class="confirm"><p><b>「${esc(item.title)}」を削除しますか？</b></p><div class="actions"><button type="button" class="btn" id="eNo">やめる</button><button type="button" class="btn danger solid primary" id="eYes">削除する</button></div></div>`;
       box.querySelector('#eNo').onclick = () => { confirming = false; paintActions(); };
-      box.querySelector('#eYes').onclick = () => { S.entries = S.entries.filter(x => x.id !== item.id); saveMeta(); closeSheet(); toast('削除しました'); render(); };
+      box.querySelector('#eYes').onclick = () => { S.entries = S.entries.filter(x => x.id !== item.id); S.idels[item.id] = {k:'entry', t:Date.now()}; saveMeta(); scheduleSync(); closeSheet(); toast('削除しました'); render(); };
     } else {
       box.innerHTML = `<div class="actions">${isNew ? '' : '<button type="button" class="btn danger" id="eDel">削除</button>'}<button type="button" class="btn primary" id="eSave">保存</button></div>`;
       const del = box.querySelector('#eDel');
@@ -2455,6 +2457,43 @@ function dropTx(id) {
   return null;
 }
 
+/* 現資産・エントリーの同期（1件ずつ、更新が新しい方を採用。削除は印で伝える） */
+const itemStamp = (k, o) => k === 'acct' ? (o.m || o.u || 0) : (o.u || 0);
+function itemsToWire() {
+  const items = [];
+  for (const a of S.accts) items.push({k:'acct', id:a.id, m:itemStamp('acct', a), x:0, d:a});
+  for (const e of S.entries) items.push({k:'entry', id:e.id, m:itemStamp('entry', e), x:0, d:e});
+  for (const id of Object.keys(S.idels)) items.push({k:S.idels[id].k, id, m:S.idels[id].t, x:1});
+  return items;
+}
+function mergeItems(res) {
+  let ch = 0;
+  if (!Array.isArray(res.items)) return -1;               // GAS が古い（現資産・エントリーに未対応）
+  for (const r of res.items) {
+    if (!r || !r.id || (r.k !== 'acct' && r.k !== 'entry')) continue;
+    const list = r.k === 'acct' ? S.accts : S.entries;
+    const local = list.find(x => x.id === r.id);
+    const lm = local ? itemStamp(r.k, local) : 0;
+    const m = Number(r.m) || 0;
+    if (r.x) {
+      if (local && m > lm) { if (r.k === 'acct') S.accts = S.accts.filter(x => x.id !== r.id); else S.entries = S.entries.filter(x => x.id !== r.id); ch++; }
+      continue;
+    }
+    const tomb = S.idels[r.id];
+    if (tomb && tomb.t >= m) continue;                    // 端末で消した後に、古い内容が残っていた場合
+    if (local && lm >= m) continue;                       // 端末の方が新しい（または同じ）
+    const clean = r.k === 'acct' ? cleanAcct({...r.d, id:r.id, m}) : cleanEntry({...r.d, id:r.id, u:m});
+    if (!clean) continue;
+    if (r.k === 'acct') S.accts = local ? S.accts.map(x => x.id === r.id ? clean : x) : [...S.accts, clean];
+    else S.entries = local ? S.entries.map(x => x.id === r.id ? clean : x) : [...S.entries, clean];
+    delete S.idels[r.id];
+    ch++;
+  }
+  const names = (cur, add) => [...new Set([...cur, ...(Array.isArray(add) ? add.map(x => String(x).trim().slice(0, 20)).filter(Boolean) : [])])].slice(-40);
+  if (res.lists) { S.acctNames = names(S.acctNames, res.lists.acctNames); S.pointNames = names(S.pointNames, res.lists.pointNames); }
+  return ch;
+}
+
 function mergeFromSheet(res, wasEmpty) {
   const st = {add:0, upd:0, del:0, cats:0, pays:0};
   const created = {cats:0, pays:0};
@@ -2491,21 +2530,26 @@ async function syncNow(opt = {}) {
   clearTimeout(syncTimer);
   if (!opt.silent) { syncNote = '同期中…'; if (ui.tab === 'set') renderSettings(); }
   const sent = Object.assign({}, S.dels);
+  const sentI = Object.assign({}, S.idels);
   try {
     const wasEmpty = realCount() === 0 && !S.sync.last;
     const tx = allTx().map(txToWire);
     for (const id of Object.keys(sent)) tx.push({id, d:'2000-01-01', t:'e', c:'', cn:'', a:1, p:'', pn:'', n:'', u:sent[id], x:1});
-    const res = await gasCall(S.sync.url, {key:S.sync.key, op:'sync', tx, settings: wasEmpty ? null : {cats:S.cats, pays:S.pays}});
+    const res = await gasCall(S.sync.url, {key:S.sync.key, op:'sync', tx, settings: wasEmpty ? null : {cats:S.cats, pays:S.pays}, items:itemsToWire(), lists:{acctNames:S.acctNames, pointNames:S.pointNames}});
     const {st, touched} = mergeFromSheet(res, wasEmpty);
+    const ich = mergeItems(res);
+    for (const id of Object.keys(sentI)) if (S.idels[id] && S.idels[id].t === sentI[id].t) delete S.idels[id];
     for (const id of Object.keys(sent)) if (S.dels[id] === sent[id]) delete S.dels[id];
     S.sync.last = Date.now();
     syncErr = '';
     const changed = st.add + st.upd + st.del + st.cats + st.pays;
     syncNote = changed ? `シートから 追加${st.add}・更新${st.upd}・削除${st.del} を反映しました` : '';
+    if (ich > 0) syncNote += `${syncNote ? '／' : ''}現資産・エントリー ${ich}件を反映しました`;
+    if (ich < 0 && (S.accts.length || S.entries.length)) syncNote = '現資産・エントリーを他の端末と同期するには、スプレッドシート側のスクリプトを最新の Code.gs に入れ替えて、デプロイし直してください。';
     if (changed) { await saveAll(); } else { await saveMeta(); }
     syncBusy = false;
     render();
-    if (!opt.silent) toast(changed ? syncNote : '同期しました（変更なし）');
+    if (!opt.silent) toast(changed || ich > 0 ? syncNote : '同期しました（変更なし）');
     return true;
   } catch (e) {
     syncErr = e.message || '同期できませんでした';
@@ -2550,7 +2594,7 @@ function openSyncSheet() {
   const no = sheet.querySelector('#yNo'); if (no) no.onclick = closeSheet;
   const off = sheet.querySelector('#yOff');
   if (off) off.onclick = () => {
-    S.sync = {url:'', key:'', auto:true, last:null}; S.dels = {}; syncErr = ''; syncNote = '';
+    S.sync = {url:'', key:'', auto:true, last:null}; S.dels = {}; S.idels = {}; syncErr = ''; syncNote = '';
     saveMeta(); closeSheet(); toast('連携を解除しました（シートのデータは残ります）'); render();
   };
   sheet.querySelector('#yOk').onclick = async () => {
