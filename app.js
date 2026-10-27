@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.10.0';
+const APP_VERSION = '1.11.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -38,7 +38,7 @@ const cashflow = x => x.t === 'i' ? x.a : -x.a;   // 収入は+、支出は−�
 /* ===== 状態 ===== */
 let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], pointNames: [], entries: [], idels: {}, prices: {}, recSkips: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
 const store = { mode: 'init', persisted: null, error: false, loaded: false };
-const ui = { acctOwner:'all', tab:'home', month:curMonth(), filter:'all', q:'', aType:'e', aBy:'cat', setType:'e', lastPay:'cash', lastType:'e' };
+const ui = { sCat:'all', acctOwner:'all', tab:'home', month:curMonth(), filter:'all', q:'', aType:'e', aBy:'cat', setType:'e', lastPay:'cash', lastType:'e' };
 
 const catById = id => S.cats.find(c => c.id === id) || {id, name:'未分類', color:'#8A8F98', type:'e'};
 const payById = id => S.pays.find(p => p.id === id) || {id, name:'その他', color:'#8A8F98'};
@@ -760,15 +760,16 @@ function renderBar() {
   const isSet = ui.tab === 'set' || ui.tab === 'acct' || ui.tab === 'entry';   // 月の切り替えが要らない画面
   $('#mLabel').textContent = ui.tab === 'set' ? '設定' : ui.tab === 'acct' ? '現資産' : ui.tab === 'entry' ? 'エントリー' : `${y}年${m}月`;
   $('#navPrev').style.visibility = $('#navNext').style.visibility = isSet ? 'hidden' : 'visible';
-  const nx = $('#navNext'), isEntry = ui.tab === 'entry';
-  if (nx.dataset.mode !== (isEntry ? 'add' : 'next')) {
+  const nx = $('#navNext');
+  const mode = ui.tab === 'entry' ? 'addentry' : ui.tab === 'acct' ? 'addacct' : 'next';
+  if (nx.dataset.mode !== mode) {
     if (!nx.dataset.orig) nx.dataset.orig = nx.innerHTML;
-    nx.dataset.mode = isEntry ? 'add' : 'next';
-    nx.innerHTML = isEntry ? '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>' : nx.dataset.orig;
-    nx.dataset.act = isEntry ? 'addentry' : 'next';
-    nx.setAttribute('aria-label', isEntry ? 'エントリーを追加' : '次の月');
+    nx.dataset.mode = mode;
+    nx.innerHTML = mode === 'next' ? nx.dataset.orig : '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+    nx.dataset.act = mode;
+    nx.setAttribute('aria-label', mode === 'addentry' ? 'エントリーを追加' : mode === 'addacct' ? '資産を追加' : '次の月');
   }
-  if (isEntry) nx.style.visibility = 'visible';
+  if (mode !== 'next') nx.style.visibility = 'visible';
   $('#todayBtn').hidden = isSet || ui.month === curMonth();
 }
 
@@ -888,6 +889,59 @@ function breakdown(key, type, by) {
   }).sort((a,b) => b.v - a.v);
 }
 
+/* ===== 分析：期間・カテゴリで集計 ===== */
+const monthEnd = ym => { const [y, m] = ym.split('-').map(Number); return `${ym}-${pad(new Date(y, m, 0).getDate())}`; };
+function searchRange(v) {
+  const cm = curMonth(), y = cm.slice(0, 4);
+  if (v === 'this') return [cm + '-01', monthEnd(cm)];
+  if (v === 'last') { const p = shiftMonth(cm, -1); return [p + '-01', monthEnd(p)]; }
+  if (v === '3m') return [shiftMonth(cm, -2) + '-01', monthEnd(cm)];
+  if (v === 'year') return [y + '-01-01', y + '-12-31'];
+  return ['', ''];
+}
+function searchCardHtml() {
+  if (ui.sFrom === undefined) { ui.sFrom = ui.month + '-01'; ui.sTo = monthEnd(ui.month); }
+  const word = ui.aType === 'e' ? '支出' : '収入';
+  const cats = S.cats.filter(c => c.type === ui.aType);
+  if (ui.sCat !== 'all' && !cats.some(c => c.id === ui.sCat)) ui.sCat = 'all';
+  const from = ui.sFrom || '', to = ui.sTo || '';
+  const bad = from && to && from > to;
+  const list = bad ? [] : allTx().filter(x => x.t === ui.aType && (!from || x.d >= from) && (!to || x.d <= to) && (ui.sCat === 'all' || x.c === ui.sCat))
+    .sort((a, b) => a.d < b.d ? 1 : a.d > b.d ? -1 : (b.s || 0) - (a.s || 0));
+  const total = list.reduce((s, x) => s + x.a, 0);
+  const label = (from || to) ? `${from ? fmtYMD(from) : '最初'} 〜 ${to ? fmtYMD(to) : '最後'}` : '全期間';
+  const chip = (v, n) => { const r = searchRange(v); return `<button type="button" class="chip small" data-act="srange" data-v="${v}" aria-pressed="${r[0] === from && r[1] === to}">${n}</button>`; };
+  let body = '';
+  if (bad) body = '<div class="empty">開始日が終了日より後になっています。</div>';
+  else if (!list.length) body = `<div class="empty">この条件の${word}はありません。</div>`;
+  else if (ui.sCat === 'all') {
+    const map = {};
+    for (const x of list) map[x.c] = (map[x.c] || 0) + x.a;
+    const rows = Object.entries(map).map(([id, v]) => ({...catById(id), v})).sort((a, b) => b.v - a.v);
+    const max = Math.max(1, rows[0].v);
+    body = rows.map(r => {
+      const pct = total > 0 ? r.v / total * 100 : 0;
+      return `<button type="button" class="rank sbtn" data-act="scat" data-v="${esc(r.id)}" aria-label="${esc(r.name)}だけに絞り込む"><div class="rtop"><span class="rname"><i class="dot" style="background:${r.color}"></i>${esc(r.name)}</span><span class="rval"><span class="amt">${r.v < 0 ? '−' : ''}${yen(r.v)}</span><span class="pct">${pct < 1 && pct > 0 ? '<1' : Math.round(Math.max(0, pct))}%</span></span></div><div class="rbar"><i style="width:${Math.max(0, r.v) / max * 100}%;background:${r.color}"></i></div></button>`;
+    }).join('');
+  } else {
+    const shown = list.slice(0, 100);
+    body = `<div class="rows" style="margin-top:6px">${shown.map(x => {
+      const c = catById(x.c), sub = [x.n, payName(x.p)].filter(Boolean).join(' · ');
+      return `<button type="button" class="row" data-act="edit" data-id="${esc(x.id)}"><i class="dot" style="background:${c.color}"></i><span class="main"><span class="cat">${esc(fmtYMD(x.d))}　${esc(c.name)}</span><span class="sub">${x.rec ? '<span class="otag">毎月</span>' : ''}${esc(sub)}</span></span><span class="amt">${yen(x.a)}</span></button>`;
+    }).join('')}</div>${list.length > shown.length ? `<div class="empty">ほか${list.length - shown.length}件。期間を狭めてください。</div>` : ''}`;
+  }
+  return `<div class="card" id="sCard">
+      <p class="sub-title">期間・カテゴリで集計</p>
+      <div class="chips" role="group" aria-label="期間の選び方">${chip('this', '今月')}${chip('last', '先月')}${chip('3m', '直近3か月')}${chip('year', '今年')}${chip('all', '全期間')}</div>
+      <div class="srow"><label><span class="flabel">開始日</span><input id="sFrom" type="date" value="${esc(from)}"></label><label><span class="flabel">終了日</span><input id="sTo" type="date" value="${esc(to)}"></label></div>
+      <label class="field" style="margin-top:12px"><span class="flabel">カテゴリ</span><select id="sCat"><option value="all">すべてのカテゴリ</option>${cats.map(c => `<option value="${esc(c.id)}"${ui.sCat === c.id ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+      <div class="lbl" style="margin-top:14px">${esc(label)}の${ui.sCat === 'all' ? '' : esc(catById(ui.sCat).name) + 'の'}${word}合計</div>
+      <div class="big${ui.aType === 'e' ? ' exp' : ' inc'}">${yen(total)}</div>
+      <p class="caption num" style="margin:2px 0 8px">${list.length.toLocaleString('ja-JP')}件</p>
+      ${body}
+    </div>`;
+}
+
 function renderStats() {
   document.querySelectorAll('#aTypeSeg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === ui.aType)));
   document.querySelectorAll('#aBySeg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === ui.aBy)));
@@ -913,6 +967,8 @@ function renderStats() {
   }).join('');
   const cur = tt[tt.length - 1];
   $('#stats').innerHTML = `
+    ${searchCardHtml()}
+    <div class="section-title">${m}月の内訳</div>
     <div class="card">
       <div class="lbl">${m}月の${word}合計</div>
       <div class="big${ui.aType === 'e' ? ' exp' : ' inc'}" style="margin-bottom:8px">${yen(total)}</div>
@@ -1125,8 +1181,7 @@ function renderAcct() {
       ${priceBox}
     </div>
     ${groups}
-    <div style="margin-top:14px"><button type="button" class="btn" data-act="addacct" style="width:100%">＋ 資産を追加</button></div>
-    <p class="note">残高や数量が変わったら、その資産をタップして更新してください。株式の株価は手入力です。ビットコイン・イーサリアムの価格は自動で取得します（円換算）。ポイントは1ポイント＝1円として合計に含めます。ここの金額は収入・支出の記録には影響しません。</p>`;
+    <p class="note">資産の追加は、右上の「＋」から行います。残高や数量が変わったら、その資産をタップして更新してください。株式の株価は手入力です。ビットコイン・イーサリアムの価格は自動で取得します（円換算）。ポイントは1ポイント＝1円として合計に含めます。ここの金額は収入・支出の記録には影響しません。</p>`;
 }
 
 function openAcctSheet(item, preset) {
@@ -2629,6 +2684,8 @@ document.addEventListener('click', e => {
     case 'filter': ui.filter = v; renderFilter(); renderList(); break;
     case 'atype': ui.aType = v; renderStats(); break;
     case 'aby': ui.aBy = v; renderStats(); break;
+    case 'srange': { const r = searchRange(v); ui.sFrom = r[0]; ui.sTo = r[1]; renderStats(); break; }
+    case 'scat': ui.sCat = v; renderStats(); break;
     case 'settype': ui.setType = v; renderSettings(); break;
     case 'editcat': { const c = S.cats.find(x => x.id === el.dataset.id); if (c) openNameSheet('cat', c); break; }
     case 'addcat': openNameSheet('cat', null, ui.setType); break;
@@ -2653,6 +2710,12 @@ document.addEventListener('click', e => {
     case 'sync-now': syncNow(); break;
     case 'dismiss-install': lsSet(LS_FLAG_INSTALL, '1'); render(); break;
   }
+});
+document.addEventListener('change', e => {
+  const t = e.target;
+  if (t.id === 'sFrom') { ui.sFrom = t.value; renderStats(); }
+  else if (t.id === 'sTo') { ui.sTo = t.value; renderStats(); }
+  else if (t.id === 'sCat') { ui.sCat = t.value; renderStats(); }
 });
 $('#q').addEventListener('input', e => { ui.q = e.target.value; renderList(); });
 $('#fileReceipt').addEventListener('change', e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; handleReceiptFile(f); });

@@ -266,3 +266,10 @@ textarea{min-height:160px;font-family:var(--font-num);font-size:13px;line-height
 .etr.done .ec:not(.c-chk){opacity:.45}
 .etr.done .c-chk .echk{opacity:.6}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+
+/* 分析：期間・カテゴリ集計 */
+.srow{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+.srow label{display:block;min-width:0}
+.srow input{width:100%}
+button.rank.sbtn{display:block;width:100%;text-align:left;background:none;border:0;border-radius:8px;color:inherit;font:inherit;cursor:pointer}
+button.rank.sbtn+button.rank.sbtn{border-top:1px solid var(--line)}
