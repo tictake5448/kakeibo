@@ -300,3 +300,18 @@ button.rank.sbtn+button.rank.sbtn{border-top:1px solid var(--line)}
 .row.selrow .selbox svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
 .row.selrow[aria-pressed="true"] .selbox{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
 .row.selrow[aria-pressed="true"]{background:var(--accent-soft)}
+
+/* トレード */
+.etr.ttr{grid-template-columns:44px 84px 62px 62px 92px 92px 92px}
+.etr.ttr .ec{padding:10px 6px;font-size:13.5px}
+.etr.ttr .c-title{position:sticky;left:44px;z-index:1;background:var(--surface);padding-left:2px}
+.etr.ttr.ehead .c-title{background:var(--bg)}
+.etr .c-num{text-align:right;font-family:var(--font-num)}
+.etr.ehead .c-num{font-family:inherit}
+.etr .c-diff{font-weight:700}
+.etr .c-diff.plus,.esum b.plus{color:var(--income)}
+.etr .c-diff.minus,.esum b.minus{color:var(--expense)}
+/* 家計簿の設定ボタン（右上） */
+.homehead{position:relative}
+.gear{position:absolute;top:12px;right:12px;z-index:2;width:40px;height:40px;background:var(--bg);box-shadow:none}
+.gear svg{width:21px;height:21px}

@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.12.0';
+const APP_VERSION = '1.13.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -36,7 +36,7 @@ const lsSet = (k,v) => { try { localStorage.setItem(k,v); } catch (e) {} };
 const cashflow = x => x.t === 'i' ? x.a : -x.a;   // 収入は+、支出は−（返金・値引きの負の支出は+になる）
 
 /* ===== 状態 ===== */
-let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], pointNames: [], entries: [], idels: {}, prices: {}, recSkips: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
+let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], pointNames: [], entries: [], trades: [], idels: {}, prices: {}, recSkips: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
 const store = { mode: 'init', persisted: null, error: false, loaded: false };
 const ui = { acctOpen:{}, sel:null, sCat:'all', acctOwner:'all', tab:'home', month:curMonth(), filter:'all', q:'', aType:'e', aBy:'cat', setType:'e', lastPay:'cash', lastType:'e' };
 
@@ -99,7 +99,7 @@ async function idbLoadAll() {
   });
   return {months, meta};
 }
-const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, idels:S.idels, prices:S.prices, recSkips:S.recSkips, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, trades:S.trades, idels:S.idels, prices:S.prices, recSkips:S.recSkips, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
 /* エントリー: {id, run(実行日), due(期限), title(内容), memo(詳細), pt(付与pt), done(達成日。空なら未達成), u} */
 function cleanEntry(e) {
   if (!e || typeof e !== 'object') return null;
@@ -108,6 +108,16 @@ function cleanEntry(e) {
   const dt = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : '';
   const pt = Math.round(Number(e.pt));
   return {id: String(e.id || 'e' + uid()), run: dt(e.run), due: dt(e.due), title, memo: String(e.memo || '').slice(0, 200), pt: Number.isFinite(pt) && pt > 0 ? Math.min(pt, 999999999) : 0, done: dt(e.done), u: Number(e.u) || 0};
+}
+/* トレード: {id, name(銘柄・任意), bd(購入日), sd(売買日), buy(買い金額), sell(売り金額。未売却はnull), done(決済済み), u}。差額＝売り金額−買い金額は保存せず、表示のとき計算する */
+function cleanTrade(t) {
+  if (!t || typeof t !== 'object') return null;
+  const dt = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : '';
+  const buy = Math.round(Number(t.buy));
+  if (!Number.isFinite(buy) || buy < 0 || buy > 1e12) return null;
+  let sell = null;
+  if (t.sell !== null && t.sell !== undefined && t.sell !== '') { const n = Math.round(Number(t.sell)); if (Number.isFinite(n) && n >= 0 && n <= 1e12) sell = n; }
+  return {id: String(t.id || 't' + uid()), name: String(t.name || '').trim().slice(0, 20), bd: dt(t.bd), sd: dt(t.sd), buy, sell, done: !!t.done, u: Number(t.u) || 0};
 }
 /* 現資産の項目: {id, kind(cash/stock/btc/eth), owner(h夫/w妻/j共有), name, bal(円)/qty(数量)/price(株価), note, color, u}。収支の記録とは別に持つ */
 function cleanAcct(a) {
@@ -161,7 +171,8 @@ function applyLoaded(months, meta) {
     if (meta.dels && typeof meta.dels === 'object' && !Array.isArray(meta.dels)) { S.dels = {}; for (const k of Object.keys(meta.dels)) if (Number(meta.dels[k])) S.dels[k] = Number(meta.dels[k]); }
     if (Array.isArray(meta.accts)) S.accts = meta.accts.map(cleanAcct).filter(Boolean);
     if (meta.recSkips && typeof meta.recSkips === 'object' && !Array.isArray(meta.recSkips)) { S.recSkips = {}; for (const k of Object.keys(meta.recSkips).slice(-3000)) S.recSkips[k] = 1; }
-    if (meta.idels && typeof meta.idels === 'object' && !Array.isArray(meta.idels)) { S.idels = {}; for (const k of Object.keys(meta.idels).slice(0, 2000)) { const v = meta.idels[k]; if (v && (v.k === 'acct' || v.k === 'entry') && Number(v.t)) S.idels[k] = {k: v.k, t: Number(v.t)}; } }
+    if (meta.idels && typeof meta.idels === 'object' && !Array.isArray(meta.idels)) { S.idels = {}; for (const k of Object.keys(meta.idels).slice(0, 2000)) { const v = meta.idels[k]; if (v && ITEM_KINDS[v.k] && Number(v.t)) S.idels[k] = {k: v.k, t: Number(v.t)}; } }
+    if (Array.isArray(meta.trades)) S.trades = meta.trades.map(cleanTrade).filter(Boolean).slice(0, 5000);
     if (Array.isArray(meta.entries)) S.entries = meta.entries.map(cleanEntry).filter(Boolean).slice(0, 2000);
     if (Array.isArray(meta.pointNames)) S.pointNames = meta.pointNames.map(x => String(x).trim().slice(0, 20)).filter(Boolean).slice(0, 40);
     if (Array.isArray(meta.acctNames)) S.acctNames = meta.acctNames.map(x => String(x).trim().slice(0, 20)).filter(Boolean).slice(0, 40);
@@ -746,33 +757,43 @@ const DAY = 86400000;
 function render() {
   if (ui.tab !== 'home') ui.sel = null;
   renderBar(); updateEntryBadge();
-  for (const id of ['home','stats','acct','entry','set']) $('#v-' + id).hidden = ui.tab !== id;
+  for (const id of ['home','stats','acct','entry','trade','set']) $('#v-' + id).hidden = ui.tab !== id;
   document.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-current', b.dataset.tab === ui.tab ? 'page' : 'false'));
-  $('#fabwrap').hidden = ui.tab === 'set' || ui.tab === 'acct' || ui.tab === 'entry' || !!ui.sel;
+  $('#fabwrap').hidden = ui.tab === 'set' || ui.tab === 'acct' || ui.tab === 'entry' || ui.tab === 'trade' || !!ui.sel;
   if (ui.tab === 'home') { renderBanner(); renderSummary(); renderFilter(); renderList(); }
   else if (ui.tab === 'stats') renderStats();
   else if (ui.tab === 'acct') { renderAcct(); refreshPrices(false); }
   else if (ui.tab === 'entry') renderEntries();
+  else if (ui.tab === 'trade') renderTrades();
   else renderSettings();
   renderSelBar();
 }
 
 function renderBar() {
   const [y,m] = ui.month.split('-').map(Number);
-  const isSet = ui.tab === 'set' || ui.tab === 'acct' || ui.tab === 'entry';   // 月の切り替えが要らない画面
-  $('#mLabel').textContent = ui.tab === 'set' ? '設定' : ui.tab === 'acct' ? '現資産' : ui.tab === 'entry' ? 'エントリー' : `${y}年${m}月`;
+  const isSet = ui.tab === 'set' || ui.tab === 'acct' || ui.tab === 'entry' || ui.tab === 'trade';   // 月の切り替えが要らない画面
+  $('#mLabel').textContent = ui.tab === 'set' ? '設定' : ui.tab === 'acct' ? '現資産' : ui.tab === 'entry' ? 'エントリー' : ui.tab === 'trade' ? 'トレード' : `${y}年${m}月`;
   $('#navPrev').style.visibility = $('#navNext').style.visibility = isSet ? 'hidden' : 'visible';
   const nx = $('#navNext');
-  const mode = ui.tab === 'entry' ? 'addentry' : ui.tab === 'acct' ? 'addacct' : 'next';
+  const mode = ui.tab === 'entry' ? 'addentry' : ui.tab === 'acct' ? 'addacct' : ui.tab === 'trade' ? 'addtrade' : 'next';
   if (nx.dataset.mode !== mode) {
     if (!nx.dataset.orig) nx.dataset.orig = nx.innerHTML;
     nx.dataset.mode = mode;
     nx.innerHTML = mode === 'next' ? nx.dataset.orig : '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
     nx.dataset.act = mode;
-    nx.setAttribute('aria-label', mode === 'addentry' ? 'エントリーを追加' : mode === 'addacct' ? '資産を追加' : '次の月');
+    nx.setAttribute('aria-label', mode === 'addentry' ? 'エントリーを追加' : mode === 'addacct' ? '資産を追加' : mode === 'addtrade' ? 'トレードを追加' : '次の月');
   }
   if (mode !== 'next') nx.style.visibility = 'visible';
+  const pv = $('#navPrev'), back = ui.tab === 'set';
+  if ((pv.dataset.mode === 'back') !== back) {
+    pv.dataset.mode = back ? 'back' : '';
+    pv.dataset.act = back ? 'tab' : 'prev';
+    if (back) pv.dataset.tab = 'home'; else delete pv.dataset.tab;
+    pv.setAttribute('aria-label', back ? '家計簿に戻る' : '前の月');
+  }
+  if (back) pv.style.visibility = 'visible';
   $('#todayBtn').hidden = isSet || ui.month === curMonth();
+  $('#gearBtn').hidden = ui.tab !== 'home';
 }
 
 function renderBanner() {
@@ -1510,6 +1531,103 @@ function openEntrySheet(item) {
   if (isNew) setTimeout(() => { try { $e('#eTitle').focus(); } catch (err) {} }, 60);
 }
 
+/* ===== トレード ===== */
+const tradeDiff = t => t.sell === null ? null : t.sell - t.buy;
+const signedYen = n => (n > 0 ? '+' : n < 0 ? '−' : '') + yen(n);
+function toggleTrade(id) {
+  const t = S.trades.find(x => x.id === id); if (!t) return;
+  const was = {done: t.done, sd: t.sd};
+  t.done = !t.done;
+  if (t.done && !t.sd) t.sd = todayStr();       // 決済済みにしたとき、売買日が空なら今日を入れる
+  t.u = Date.now();
+  saveMeta(); scheduleSync(); renderTrades();
+  toast(t.done ? '決済済みにしました' : '未決済に戻しました', {action:'元に戻す', fn: () => { t.done = was.done; t.sd = was.sd; t.u = Date.now(); saveMeta(); scheduleSync(); renderTrades(); }});
+}
+function renderTrades() {
+  const box = $('#trade');
+  if (!store.loaded) { box.innerHTML = '<div class="card"><p class="muted" style="margin:0">読み込み中…</p></div>'; return; }
+  if (!S.trades.length) {
+    box.innerHTML = `<div class="welcome card"><h2>トレードを登録しましょう</h2><p>購入日・売買日・買い金額・売り金額を登録すると、差額（売り金額 − 買い金額）が自動で出ます。決済が済んだものにチェックを入れるとグレーになります。右上の「＋」からも追加できます。</p><button type="button" class="btn primary" data-act="addtrade">トレードを追加する</button></div>`;
+    return;
+  }
+  const key = v => v || '0000-00-00';
+  const open = S.trades.filter(t => !t.done).sort((a, b) => key(b.bd) < key(a.bd) ? -1 : key(b.bd) > key(a.bd) ? 1 : b.u - a.u);
+  const done = S.trades.filter(t => t.done).sort((a, b) => key(b.sd) < key(a.sd) ? -1 : key(b.sd) > key(a.sd) ? 1 : b.u - a.u);
+  const sold = S.trades.filter(t => t.sell !== null);
+  const pl = sold.reduce((s, t) => s + t.sell - t.buy, 0);
+  const row = t => {
+    const d = tradeDiff(t);
+    const cell = (cls, txt) => `<span class="ec ${cls}">${txt ? esc(txt) : ''}</span>`;
+    return `<div class="etr ttr${t.done ? ' done' : ''}" role="row" data-act="edittrade" data-id="${esc(t.id)}">
+      <span class="ec c-chk"><button type="button" class="echk" data-act="toggletrade" data-id="${esc(t.id)}" aria-pressed="${t.done}" aria-label="${esc(t.name || 'トレード')}を${t.done ? '未決済に戻す' : '決済済みにする'}"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span></button></span>
+      <span class="ec c-title"><button type="button" class="elink" data-act="edittrade" data-id="${esc(t.id)}">${t.name ? esc(t.name) : '<span class="muted">（銘柄なし）</span>'}</button></span>
+      ${cell('c-run', t.bd ? fmtYMD(t.bd) : '')}
+      ${cell('c-due', t.sd ? fmtYMD(t.sd) : '')}
+      ${cell('c-num', yen(t.buy))}
+      ${cell('c-num', t.sell === null ? '' : yen(t.sell))}
+      ${cell('c-num c-diff' + (d > 0 ? ' plus' : d < 0 ? ' minus' : ''), d === null ? '' : signedYen(d))}
+    </div>`;
+  };
+  box.innerHTML = `
+    <div class="esum"><span>差額の合計 <b class="${pl > 0 ? 'plus' : pl < 0 ? 'minus' : ''}">${signedYen(pl)}</b>（売却ありの${sold.length}件）</span><span>未決済 <b>${open.length}件</b>・買い金額 <b>${yen(open.reduce((s, t) => s + t.buy, 0))}</b></span></div>
+    <div class="escroll" role="table" aria-label="トレード一覧">
+      <div class="etable">
+        <div class="etr ttr ehead" role="row"><span class="ec c-chk"><span class="sr">決済済み</span></span><span class="ec c-title">銘柄</span><span class="ec c-run">購入日</span><span class="ec c-due">売買日</span><span class="ec c-num">買い金額</span><span class="ec c-num">売り金額</span><span class="ec c-num">差額</span></div>
+        ${open.map(row).join('')}${done.map(row).join('')}
+      </div>
+    </div>
+    <p class="note">差額は「売り金額 − 買い金額」で自動で計算します。左のチェックで決済済み（グレー）になり、売買日が空なら今日の日付が入ります。行をタップすると編集できます。表は左右にスクロールできます。右上の「＋」で追加します。</p>`;
+}
+function openTradeSheet(item) {
+  const isNew = !item;
+  let confirming = false;
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>トレードを${isNew ? '追加' : '編集'}</h2>${closeBtn('tClose')}</div>
+    <label class="field" style="margin-top:0"><span class="flabel">銘柄・メモ（任意）</span><input id="tName" type="text" maxlength="20" autocomplete="off" placeholder="例：BTC、トヨタ"></label>
+    <label class="field"><span class="flabel">購入日（任意）</span><input id="tBd" type="date"></label>
+    <label class="field"><span class="flabel">売買日（任意）</span><input id="tSd" type="date"></label>
+    <label class="field"><span class="flabel">買い金額</span><span class="amount"><b>¥</b><input id="tBuy" type="text" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="買い金額"></span></label>
+    <label class="field"><span class="flabel">売り金額（売っていなければ空のまま）</span><span class="amount"><b>¥</b><input id="tSell" type="text" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="売り金額"></span></label>
+    <p class="note" id="tPrev" style="margin:8px 4px 0;font-weight:600"></p>
+    <div class="sheet-foot"><p class="err" id="tErr" role="alert" style="min-height:0;margin:0 0 6px"></p><div id="tActions"></div></div>`, `トレードを${isNew ? '追加' : '編集'}`);
+  const $t = id => sheet.querySelector(id);
+  const setErr = m => { $t('#tErr').textContent = m || ''; };
+  if (item) { $t('#tName').value = item.name; $t('#tBd').value = item.bd; $t('#tSd').value = item.sd; $t('#tBuy').value = String(item.buy); $t('#tSell').value = item.sell === null ? '' : String(item.sell); }
+  const paintPrev = () => {
+    const b = $t('#tBuy').value, s = $t('#tSell').value;
+    $t('#tPrev').textContent = b !== '' && s !== '' ? `差額（売り − 買い）＝ ${signedYen(Number(s) - Number(b))}` : '';
+  };
+  function save() {
+    const buy = $t('#tBuy').value;
+    if (buy === '') { setErr('買い金額を入力してください。'); return; }
+    const sell = $t('#tSell').value;
+    const out = cleanTrade({id: isNew ? 't' + uid() : item.id, name: $t('#tName').value, bd: $t('#tBd').value, sd: $t('#tSd').value, buy: Number(buy), sell: sell === '' ? null : Number(sell), done: isNew ? false : item.done, u: Date.now()});
+    if (!out) { setErr('金額を確認してください。'); return; }
+    S.trades = isNew ? [...S.trades, out] : S.trades.map(x => x.id === out.id ? out : x);
+    saveMeta(); scheduleSync(); closeSheet(); toast('保存しました'); render();
+  }
+  const paintActions = () => {
+    const box = $t('#tActions');
+    if (confirming) {
+      box.innerHTML = `<div class="confirm"><p><b>「${esc(item.name || 'このトレード')}」を削除しますか？</b></p><div class="actions"><button type="button" class="btn" id="tNo">やめる</button><button type="button" class="btn danger solid primary" id="tYes">削除する</button></div></div>`;
+      box.querySelector('#tNo').onclick = () => { confirming = false; paintActions(); };
+      box.querySelector('#tYes').onclick = () => { S.trades = S.trades.filter(x => x.id !== item.id); S.idels[item.id] = {k:'trade', t:Date.now()}; saveMeta(); scheduleSync(); closeSheet(); toast('削除しました'); render(); };
+    } else {
+      box.innerHTML = `<div class="actions">${isNew ? '' : '<button type="button" class="btn danger" id="tDel">削除</button>'}<button type="button" class="btn primary" id="tSave">保存</button></div>`;
+      const del = box.querySelector('#tDel');
+      if (del) del.onclick = () => { confirming = true; paintActions(); };
+      box.querySelector('#tSave').onclick = save;
+    }
+  };
+  sheet.oninput = e => {
+    setErr('');
+    if (e.target.id === 'tBuy' || e.target.id === 'tSell') { const v = numClean(e.target.value, 0).slice(0, 12); if (e.target.value !== v) e.target.value = v; paintPrev(); }
+  };
+  $t('#tClose').onclick = closeSheet;
+  paintPrev(); paintActions();
+  if (isNew) setTimeout(() => { try { $t('#tName').focus(); } catch (err) {} }, 60);
+}
+
 /* ===== 入力シート ===== */
 function defaultDate() { const t = todayStr(); return t.slice(0,7) === ui.month ? t : ui.month + '-01'; }
 const payChips = (selected, orig) => {
@@ -1744,8 +1862,8 @@ async function exportCsv(scope) {
 
 /* ===== バックアップ ===== */
 async function exportBackup() {
-  if (!realCount() && !Object.keys(S.learn).length && !S.accts.length && !S.entries.length) { toast('バックアップする記録がありません'); return; }
-  const data = {app:'kakeibo', version:1, exportedAt:new Date().toISOString(), cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, months:S.months};
+  if (!realCount() && !Object.keys(S.learn).length && !S.accts.length && !S.entries.length && !S.trades.length) { toast('バックアップする記録がありません'); return; }
+  const data = {app:'kakeibo', version:1, exportedAt:new Date().toISOString(), cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, trades:S.trades, months:S.months};
   const d = todayStr().replace(/-/g, '');
   const r = await deliverFile(JSON.stringify(data), `kakeibo-backup-${d}.json`, 'application/json');
   if (r === 'shared' || r === 'downloaded') {
@@ -1770,13 +1888,13 @@ async function handleBackupFile(file) {
   const range = ds.length ? `${ds[0]} 〜 ${ds[ds.length-1]}` : '記録なし';
   const sheet = openSheet(`
     <div class="sheet-head"><h2>バックアップから復元</h2>${closeBtn('bClose')}</div>
-    <div class="card"><dl class="kv"><dt>記録</dt><dd>${n.toLocaleString('ja-JP')}件</dd><dt>期間</dt><dd>${esc(range)}</dd>${Array.isArray(obj.accts) ? `<dt>現資産の項目</dt><dd>${obj.accts.length}件</dd>` : ''}${Array.isArray(obj.entries) ? `<dt>エントリー</dt><dd>${obj.entries.length}件</dd>` : ''}<dt>書き出した日時</dt><dd>${esc(obj.exportedAt ? new Date(obj.exportedAt).toLocaleString('ja-JP') : '不明')}</dd></dl></div>
+    <div class="card"><dl class="kv"><dt>記録</dt><dd>${n.toLocaleString('ja-JP')}件</dd><dt>期間</dt><dd>${esc(range)}</dd>${Array.isArray(obj.accts) ? `<dt>現資産の項目</dt><dd>${obj.accts.length}件</dd>` : ''}${Array.isArray(obj.entries) ? `<dt>エントリー</dt><dd>${obj.entries.length}件</dd>` : ''}${Array.isArray(obj.trades) ? `<dt>トレード</dt><dd>${obj.trades.length}件</dd>` : ''}<dt>書き出した日時</dt><dd>${esc(obj.exportedAt ? new Date(obj.exportedAt).toLocaleString('ja-JP') : '不明')}</dd></dl></div>
     ${bad ? `<p class="note">読み取れない記録が${bad}件ありました。それらは復元されません。</p>` : ''}
     <p class="err" style="min-height:0;margin-top:14px"><b>いま入っている記録${realCount().toLocaleString('ja-JP')}件は、すべてこのバックアップの内容に置き換わります。</b></p>
     <div class="sheet-foot"><div class="actions"><button type="button" class="btn" id="bNo">やめる</button><button type="button" class="btn danger solid primary" id="bYes">置き換えて復元</button></div></div>`, 'バックアップから復元');
   sheet.querySelector('#bClose').onclick = sheet.querySelector('#bNo').onclick = closeSheet;
   sheet.querySelector('#bYes').onclick = () => {
-    applyLoaded(months, {cats:obj.cats, pays:obj.pays, learn:obj.learn, accts:obj.accts, acctNames:obj.acctNames, pointNames:obj.pointNames, entries:obj.entries, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+    applyLoaded(months, {cats:obj.cats, pays:obj.pays, learn:obj.learn, accts:obj.accts, acctNames:obj.acctNames, pointNames:obj.pointNames, entries:obj.entries, trades:obj.trades, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
     saveAll();
     closeSheet(); toast(`${n.toLocaleString('ja-JP')}件を復元しました`); render();
   };
@@ -2589,11 +2707,15 @@ function dropTx(id) {
 }
 
 /* 現資産・エントリーの同期（1件ずつ、更新が新しい方を採用。削除は印で伝える） */
-const itemStamp = (k, o) => k === 'acct' ? (o.m || o.u || 0) : (o.u || 0);
+const ITEM_KINDS = {
+  acct:  {list: () => S.accts,   set: v => { S.accts = v; },   stamp: o => o.m || o.u || 0, clean: (d, id, m) => cleanAcct({...d, id, m})},
+  entry: {list: () => S.entries, set: v => { S.entries = v; }, stamp: o => o.u || 0,        clean: (d, id, m) => cleanEntry({...d, id, u:m})},
+  trade: {list: () => S.trades,  set: v => { S.trades = v; },  stamp: o => o.u || 0,        clean: (d, id, m) => cleanTrade({...d, id, u:m})}
+};
+const itemStamp = (k, o) => ITEM_KINDS[k].stamp(o);
 function itemsToWire() {
   const items = [];
-  for (const a of S.accts) items.push({k:'acct', id:a.id, m:itemStamp('acct', a), x:0, d:a});
-  for (const e of S.entries) items.push({k:'entry', id:e.id, m:itemStamp('entry', e), x:0, d:e});
+  for (const k of Object.keys(ITEM_KINDS)) for (const o of ITEM_KINDS[k].list()) items.push({k, id:o.id, m:itemStamp(k, o), x:0, d:o});
   for (const id of Object.keys(S.idels)) items.push({k:S.idels[id].k, id, m:S.idels[id].t, x:1});
   return items;
 }
@@ -2601,22 +2723,21 @@ function mergeItems(res) {
   let ch = 0;
   if (!Array.isArray(res.items)) return -1;               // GAS が古い（現資産・エントリーに未対応）
   for (const r of res.items) {
-    if (!r || !r.id || (r.k !== 'acct' && r.k !== 'entry')) continue;
-    const list = r.k === 'acct' ? S.accts : S.entries;
-    const local = list.find(x => x.id === r.id);
-    const lm = local ? itemStamp(r.k, local) : 0;
+    if (!r || !r.id || !ITEM_KINDS[r.k]) continue;
+    const K = ITEM_KINDS[r.k];
+    const local = K.list().find(x => x.id === r.id);
+    const lm = local ? K.stamp(local) : 0;
     const m = Number(r.m) || 0;
     if (r.x) {
-      if (local && m > lm) { if (r.k === 'acct') S.accts = S.accts.filter(x => x.id !== r.id); else S.entries = S.entries.filter(x => x.id !== r.id); ch++; }
+      if (local && m > lm) { K.set(K.list().filter(x => x.id !== r.id)); ch++; }
       continue;
     }
     const tomb = S.idels[r.id];
     if (tomb && tomb.t >= m) continue;                    // 端末で消した後に、古い内容が残っていた場合
     if (local && lm >= m) continue;                       // 端末の方が新しい（または同じ）
-    const clean = r.k === 'acct' ? cleanAcct({...r.d, id:r.id, m}) : cleanEntry({...r.d, id:r.id, u:m});
+    const clean = K.clean(r.d, r.id, m);
     if (!clean) continue;
-    if (r.k === 'acct') S.accts = local ? S.accts.map(x => x.id === r.id ? clean : x) : [...S.accts, clean];
-    else S.entries = local ? S.entries.map(x => x.id === r.id ? clean : x) : [...S.entries, clean];
+    K.set(local ? K.list().map(x => x.id === r.id ? clean : x) : [...K.list(), clean]);
     delete S.idels[r.id];
     ch++;
   }
@@ -2774,6 +2895,9 @@ document.addEventListener('click', e => {
     case 'addacct': openAcctSheet(null, null, el.dataset.kind); break;
     case 'acctgrp': ui.acctOpen[v] = ui.acctOpen[v] === false; renderAcct(); break;
     case 'addentry': openEntrySheet(null); break;
+    case 'addtrade': openTradeSheet(null); break;
+    case 'edittrade': { const t = S.trades.find(x => x.id === el.dataset.id); if (t) openTradeSheet(t); break; }
+    case 'toggletrade': toggleTrade(el.dataset.id); break;
     case 'editentry': { const e = S.entries.find(x => x.id === el.dataset.id); if (e) openEntrySheet(e); break; }
     case 'toggleentry': toggleEntry(el.dataset.id); break;
     case 'acctowner': ui.acctOwner = v; renderAcct(); break;

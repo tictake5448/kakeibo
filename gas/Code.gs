@@ -11,7 +11,7 @@
  * シートで直接直したとき、H列は自動で更新されます（onEdit）。
  *
  * 「資産・エントリー」シート（アプリの現資産・エントリーを端末どうしで共有するための保管場所。手で編集しないでください）
- *  A:区分(acct/entry/list)  B:ID  C:データ(JSON)  D:更新  E:削除(1で削除)
+ *  A:区分(acct/entry/trade/list)  B:ID  C:データ(JSON)  D:更新  E:削除(1で削除)
  */
 
 // ★ここを書き換える（アプリの設定画面にも同じものを入れる）
@@ -26,7 +26,7 @@ const SET_HEAD = ['区分', 'ID', '種別', '名前', '色'];
 const NCOL = TX_HEAD.length;
 
 function doGet() {
-  return out_({ok: true, app: 'kakeibo-sync', version: 2});
+  return out_({ok: true, app: 'kakeibo-sync', version: 3});
 }
 
 function doPost(e) {
@@ -203,7 +203,7 @@ function items_(sh, req) {
     order.push(key);
   });
   (req.items || []).forEach(function (c) {
-    if (!c || !c.id || (c.k !== 'acct' && c.k !== 'entry')) return;
+    if (!c || !c.id || (c.k !== 'acct' && c.k !== 'entry' && c.k !== 'trade')) return;
     const key = c.k + ':' + String(c.id);
     const m = Number(c.m) || 0;
     const cur = map[key];
