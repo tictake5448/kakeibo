@@ -329,3 +329,10 @@ input[type=date]::-webkit-datetime-edit{padding:0}
 .etr.ttr.done .ec:not(.c-chk){opacity:1;color:var(--muted)}
 .etr.ttr.done .c-diff.plus,.etr.ttr.done .c-diff.minus{color:var(--muted)}
 .etr.ttr.done .echk{opacity:.7}
+
+/* トレード：株の表 */
+.etr.ttr.stk{grid-template-columns:44px 104px 74px 66px 92px 64px 92px 64px 112px}
+.etr.ttr.stk .c-title{position:sticky;left:44px;z-index:1;background:var(--surface);padding-left:2px}
+.etr.ttr.stk.ehead .c-title{background:var(--bg)}
+.etr.ttr.stk .c-run{position:static;background:none;padding-left:6px}
+.tgh{margin-top:6px}
