@@ -302,10 +302,13 @@ button.rank.sbtn+button.rank.sbtn{border-top:1px solid var(--line)}
 .row.selrow[aria-pressed="true"]{background:var(--accent-soft)}
 
 /* トレード */
-.etr.ttr{grid-template-columns:44px 84px 62px 62px 92px 92px 92px}
+.etr.ttr{grid-template-columns:44px 74px 66px 96px 82px 112px 82px 120px}
 .etr.ttr .ec{padding:10px 6px;font-size:13.5px}
-.etr.ttr .c-title{position:sticky;left:44px;z-index:1;background:var(--surface);padding-left:2px}
-.etr.ttr.ehead .c-title{background:var(--bg)}
+.etr.ttr .c-run{position:sticky;left:44px;z-index:1;background:var(--surface);padding-left:2px}
+.etr.ttr.ehead .c-run{background:var(--bg)}
+.etr.ttr .elink{font-weight:600}
+.nowtag{display:inline-block;margin-right:4px;padding:0 5px;border-radius:6px;background:var(--accent-soft);color:var(--accent);font-size:10.5px;font-weight:700;line-height:16px;vertical-align:1px}
+.etr .live{color:var(--accent)}
 .etr .c-num{text-align:right;font-family:var(--font-num)}
 .etr.ehead .c-num{font-family:inherit}
 .etr .c-diff{font-weight:700}
@@ -315,3 +318,14 @@ button.rank.sbtn+button.rank.sbtn{border-top:1px solid var(--line)}
 .homehead{position:relative}
 .gear{position:absolute;top:12px;right:12px;z-index:2;width:40px;height:40px;background:var(--bg);box-shadow:none}
 .gear svg{width:21px;height:21px}
+
+/* 日付の入力欄が画面からはみ出さないようにする（iPhone） */
+input[type=date]{-webkit-appearance:none;appearance:none;text-align:left}
+input[type=date]::-webkit-date-and-time-value{text-align:left;min-width:0}
+input[type=date]::-webkit-datetime-edit{padding:0}
+/* トレード：差額は右端に固定して、横にスクロールしても見えるようにする */
+.etr.ttr .c-diff{position:sticky;right:0;z-index:1;background:var(--surface);box-shadow:-8px 0 8px -8px rgba(0,0,0,.25)}
+.etr.ttr.ehead .c-diff{background:var(--bg)}
+.etr.ttr.done .ec:not(.c-chk){opacity:1;color:var(--muted)}
+.etr.ttr.done .c-diff.plus,.etr.ttr.done .c-diff.minus{color:var(--muted)}
+.etr.ttr.done .echk{opacity:.7}

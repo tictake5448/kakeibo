@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.13.0';
+const APP_VERSION = '1.14.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -109,15 +109,22 @@ function cleanEntry(e) {
   const pt = Math.round(Number(e.pt));
   return {id: String(e.id || 'e' + uid()), run: dt(e.run), due: dt(e.due), title, memo: String(e.memo || '').slice(0, 200), pt: Number.isFinite(pt) && pt > 0 ? Math.min(pt, 999999999) : 0, done: dt(e.done), u: Number(e.u) || 0};
 }
-/* トレード: {id, name(銘柄・任意), bd(購入日), sd(売買日), buy(買い金額), sell(売り金額。未売却はnull), done(決済済み), u}。差額＝売り金額−買い金額は保存せず、表示のとき計算する */
+/* トレード（ビットコインのみ）: {id, bd(購入日), sd(売買日), bp(買値=1BTCの価格・円), bq(買い枚数), sp(売値。未売却はnull), sq(売り枚数), done(決済済み), u}
+   旧形式（buy/sell＝合計金額）は、枚数1として読み替える */
 function cleanTrade(t) {
   if (!t || typeof t !== 'object') return null;
   const dt = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : '';
-  const buy = Math.round(Number(t.buy));
-  if (!Number.isFinite(buy) || buy < 0 || buy > 1e12) return null;
-  let sell = null;
-  if (t.sell !== null && t.sell !== undefined && t.sell !== '') { const n = Math.round(Number(t.sell)); if (Number.isFinite(n) && n >= 0 && n <= 1e12) sell = n; }
-  return {id: String(t.id || 't' + uid()), name: String(t.name || '').trim().slice(0, 20), bd: dt(t.bd), sd: dt(t.sd), buy, sell, done: !!t.done, u: Number(t.u) || 0};
+  const has = v => v !== null && v !== undefined && v !== '';
+  let bp = t.bp, bq = t.bq, sp = t.sp, sq = t.sq;
+  if (bp === undefined && t.buy !== undefined) { bp = t.buy; bq = 1; if (has(t.sell)) { sp = t.sell; sq = 1; } }
+  bp = Math.round(Number(bp)); bq = Math.round(Number(bq) * 1e8) / 1e8;
+  if (!Number.isFinite(bp) || bp < 0 || bp > 1e10 || !Number.isFinite(bq) || bq <= 0 || bq > 1e6) return null;
+  let spo = null, sqo = null;
+  if (has(sp)) {
+    const p = Math.round(Number(sp)); let q = has(sq) ? Math.round(Number(sq) * 1e8) / 1e8 : bq;
+    if (Number.isFinite(p) && p >= 0 && p <= 1e10 && Number.isFinite(q) && q > 0 && q <= 1e6) { spo = p; sqo = q; }
+  }
+  return {id: String(t.id || 't' + uid()), bd: dt(t.bd), sd: dt(t.sd), bp, bq, sp: spo, sq: sqo, done: !!t.done, u: Number(t.u) || 0};
 }
 /* 現資産の項目: {id, kind(cash/stock/btc/eth), owner(h夫/w妻/j共有), name, bal(円)/qty(数量)/price(株価), note, color, u}。収支の記録とは別に持つ */
 function cleanAcct(a) {
@@ -764,7 +771,7 @@ function render() {
   else if (ui.tab === 'stats') renderStats();
   else if (ui.tab === 'acct') { renderAcct(); refreshPrices(false); }
   else if (ui.tab === 'entry') renderEntries();
-  else if (ui.tab === 'trade') renderTrades();
+  else if (ui.tab === 'trade') { renderTrades(); refreshPrices(false, TRADE_TTL); }
   else renderSettings();
   renderSelBar();
 }
@@ -1143,6 +1150,7 @@ const COINS = {btc:{name:'ビットコイン', sym:'BTC', bf:'BTC_JPY', cg:'bitc
 const KIND_GROUPS = [['cash','預貯金'], ['stock','株'], ['crypto','暗号資産'], ['point','ポイント']];
 const groupOf = k => COINS[k] ? 'crypto' : k;
 const PRICE_TTL = 5 * 60 * 1000;
+const TRADE_TTL = 30 * 1000;      // トレード画面では、約30秒ごとに価格を取り直す
 /* 1つの資産のいまの評価額（円）。預貯金は残高、株式は株数×株価、暗号資産は保有数量×取得済みの価格 */
 const acctValue = a => a.kind === 'stock' ? Math.round((a.qty || 0) * (a.price || 0))
   : COINS[a.kind] ? (S.prices[a.kind] ? Math.round((a.qty || 0) * S.prices[a.kind].p) : 0) : a.bal;
@@ -1180,26 +1188,29 @@ async function fetchPrice(c) {
   }
   return null;
 }
-async function refreshPrices(force) {
-  const kinds = [...new Set(S.accts.map(a => a.kind).filter(k => COINS[k]))];
+async function refreshPrices(force, ttl = PRICE_TTL) {
+  const kinds = [...new Set([...S.accts.map(a => a.kind).filter(k => COINS[k]), ...(S.trades.length || ui.tab === 'trade' ? ['btc'] : [])])];
   if (!kinds.length || priceBusy) return;
   const now = Date.now();
-  const need = kinds.filter(k => force || ((!S.prices[k] || S.prices[k].manual || now - S.prices[k].t > PRICE_TTL) && now - (lastPriceTry[k] || 0) >= 60000));
+  const need = kinds.filter(k => force || ((!S.prices[k] || S.prices[k].manual || now - S.prices[k].t > ttl) && now - (lastPriceTry[k] || 0) >= Math.min(60000, ttl)));
   if (!need.length) return;
   need.forEach(k => { lastPriceTry[k] = now; });
   if (navigator.onLine === false) {
     priceNote = 'オフラインのため価格を更新できません。前回の価格（または手入力した価格）で表示しています。';
     if (ui.tab === 'acct') renderAcct();
+    if (ui.tab === 'trade') renderTrades();
     return;
   }
   priceBusy = true; priceNote = '';
   if (ui.tab === 'acct') renderAcct();
+  if (ui.tab === 'trade') renderTrades();
   let ok = 0;
   await Promise.all(need.map(async k => { const p = await fetchPrice(k); if (p) { S.prices[k] = {p, t: Date.now(), manual: false}; ok++; } }));
   priceBusy = false;
   priceNote = ok === need.length ? '' : '一部の価格を取得できませんでした。前回の価格（または手入力した価格）で表示しています。資産の編集画面で価格を手入力することもできます。';
   if (ok) saveMeta();
   if (ui.tab === 'acct') renderAcct();
+  if (ui.tab === 'trade') renderTrades();
 }
 
 function acctDetail(a) {
@@ -1531,9 +1542,13 @@ function openEntrySheet(item) {
   if (isNew) setTimeout(() => { try { $e('#eTitle').focus(); } catch (err) {} }, 60);
 }
 
-/* ===== トレード ===== */
-const tradeDiff = t => t.sell === null ? null : t.sell - t.buy;
+/* ===== トレード（ビットコイン） ===== */
+const btcNow = () => (S.prices.btc && S.prices.btc.p > 0) ? S.prices.btc : null;
+const tradeCost = t => Math.round(t.bp * t.bq);
+const tradeRealized = t => t.sp === null ? null : Math.round((t.sp - t.bp) * t.sq);    // 売った分の差額（売値 − 買値）× 売り枚数
+const tradeFloating = t => { const n = btcNow(); return t.sp === null && !t.done && n ? Math.round((n.p - t.bp) * t.bq) : null; };   // 未売却の「今」の差額
 const signedYen = n => (n > 0 ? '+' : n < 0 ? '−' : '') + yen(n);
+const diffCls = n => n > 0 ? 'plus' : n < 0 ? 'minus' : '';
 function toggleTrade(id) {
   const t = S.trades.find(x => x.id === id); if (!t) return;
   const was = {done: t.done, sd: t.sd};
@@ -1547,69 +1562,94 @@ function renderTrades() {
   const box = $('#trade');
   if (!store.loaded) { box.innerHTML = '<div class="card"><p class="muted" style="margin:0">読み込み中…</p></div>'; return; }
   if (!S.trades.length) {
-    box.innerHTML = `<div class="welcome card"><h2>トレードを登録しましょう</h2><p>購入日・売買日・買い金額・売り金額を登録すると、差額（売り金額 − 買い金額）が自動で出ます。決済が済んだものにチェックを入れるとグレーになります。右上の「＋」からも追加できます。</p><button type="button" class="btn primary" data-act="addtrade">トレードを追加する</button></div>`;
+    box.innerHTML = `<div class="welcome card"><h2>ビットコインのトレードを登録しましょう</h2><p>購入日・買値・買い枚数を登録すると、売値には今のビットコインの価格が反映され、「今いくらのプラス・マイナスか」が自動で出ます。売ったときは、売値・売り枚数を入れると差額が確定します。右上の「＋」からも追加できます。</p><button type="button" class="btn primary" data-act="addtrade">トレードを追加する</button></div>`;
     return;
   }
   const key = v => v || '0000-00-00';
   const open = S.trades.filter(t => !t.done).sort((a, b) => key(b.bd) < key(a.bd) ? -1 : key(b.bd) > key(a.bd) ? 1 : b.u - a.u);
   const done = S.trades.filter(t => t.done).sort((a, b) => key(b.sd) < key(a.sd) ? -1 : key(b.sd) > key(a.sd) ? 1 : b.u - a.u);
-  const sold = S.trades.filter(t => t.sell !== null);
-  const pl = sold.reduce((s, t) => s + t.sell - t.buy, 0);
+  const now = btcNow();
+  const realized = S.trades.reduce((s, t) => s + (tradeRealized(t) || 0), 0);
+  const nSold = S.trades.filter(t => t.sp !== null).length;
+  const floats = S.trades.map(tradeFloating).filter(v => v !== null);
+  const floating = floats.reduce((s, v) => s + v, 0);
   const row = t => {
-    const d = tradeDiff(t);
-    const cell = (cls, txt) => `<span class="ec ${cls}">${txt ? esc(txt) : ''}</span>`;
+    const r = tradeRealized(t), f = tradeFloating(t);
+    const cell = (cls, html) => `<span class="ec ${cls}">${html || ''}</span>`;
+    const live = t.sp === null && !t.done;
+    const sellCell = t.sp !== null ? yen(t.sp) : live ? (now ? `<small class="nowtag">現在</small>${yen(now.p)}` : '<span class="muted">取得中…</span>') : '';
+    const diffCell = r !== null ? signedYen(r) : f !== null ? `<small class="nowtag">今</small>${signedYen(f)}` : '';
+    const d = r !== null ? r : f;
     return `<div class="etr ttr${t.done ? ' done' : ''}" role="row" data-act="edittrade" data-id="${esc(t.id)}">
-      <span class="ec c-chk"><button type="button" class="echk" data-act="toggletrade" data-id="${esc(t.id)}" aria-pressed="${t.done}" aria-label="${esc(t.name || 'トレード')}を${t.done ? '未決済に戻す' : '決済済みにする'}"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span></button></span>
-      <span class="ec c-title"><button type="button" class="elink" data-act="edittrade" data-id="${esc(t.id)}">${t.name ? esc(t.name) : '<span class="muted">（銘柄なし）</span>'}</button></span>
-      ${cell('c-run', t.bd ? fmtYMD(t.bd) : '')}
-      ${cell('c-due', t.sd ? fmtYMD(t.sd) : '')}
-      ${cell('c-num', yen(t.buy))}
-      ${cell('c-num', t.sell === null ? '' : yen(t.sell))}
-      ${cell('c-num c-diff' + (d > 0 ? ' plus' : d < 0 ? ' minus' : ''), d === null ? '' : signedYen(d))}
+      <span class="ec c-chk"><button type="button" class="echk" data-act="toggletrade" data-id="${esc(t.id)}" aria-pressed="${t.done}" aria-label="${t.bd ? esc(fmtYMD(t.bd)) + 'の' : ''}トレードを${t.done ? '未決済に戻す' : '決済済みにする'}"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span></button></span>
+      ${cell('c-run', t.bd ? `<button type="button" class="elink" data-act="edittrade" data-id="${esc(t.id)}">${esc(fmtYMD(t.bd))}</button>` : `<button type="button" class="elink" data-act="edittrade" data-id="${esc(t.id)}"><span class="muted">日付なし</span></button>`)}
+      ${cell('c-due', t.sd ? esc(fmtYMD(t.sd)) : '')}
+      ${cell('c-num', yen(t.bp))}
+      ${cell('c-num', esc(fmtQty(t.bq, 8)))}
+      ${cell('c-num' + (live ? ' live' : ''), sellCell)}
+      ${cell('c-num', t.sq === null ? '' : esc(fmtQty(t.sq, 8)))}
+      ${cell('c-num c-diff ' + diffCls(d), diffCell)}
     </div>`;
   };
+  const priceLine = priceBusy ? '価格を取得中…' : now ? `現在のBTC価格 <b>${yen(now.p)}</b>（${fmtMDHM(now.t)}時点）` : '現在のBTC価格を取得できていません';
   box.innerHTML = `
-    <div class="esum"><span>差額の合計 <b class="${pl > 0 ? 'plus' : pl < 0 ? 'minus' : ''}">${signedYen(pl)}</b>（売却ありの${sold.length}件）</span><span>未決済 <b>${open.length}件</b>・買い金額 <b>${yen(open.reduce((s, t) => s + t.buy, 0))}</b></span></div>
+    <div class="esum"><span>${priceLine}</span><button type="button" class="chip small" data-act="trade-refresh"${priceBusy ? ' disabled' : ''}>価格を更新</button></div>
+    <div class="esum"><span>確定した差額 <b class="${diffCls(realized)}">${signedYen(realized)}</b>（売却${nSold}件）</span><span>今の差額 <b class="${diffCls(floating)}">${floats.length ? signedYen(floating) : '―'}</b>（未売却${floats.length}件）</span></div>
+    ${priceNote ? `<div class="meter-cap" style="color:var(--warn);margin:0 4px 8px">${esc(priceNote)}</div>` : ''}
     <div class="escroll" role="table" aria-label="トレード一覧">
       <div class="etable">
-        <div class="etr ttr ehead" role="row"><span class="ec c-chk"><span class="sr">決済済み</span></span><span class="ec c-title">銘柄</span><span class="ec c-run">購入日</span><span class="ec c-due">売買日</span><span class="ec c-num">買い金額</span><span class="ec c-num">売り金額</span><span class="ec c-num">差額</span></div>
+        <div class="etr ttr ehead" role="row"><span class="ec c-chk"><span class="sr">決済済み</span></span><span class="ec c-run">購入日</span><span class="ec c-due">売買日</span><span class="ec c-num">買値</span><span class="ec c-num">買い枚数</span><span class="ec c-num">売値</span><span class="ec c-num">売り枚数</span><span class="ec c-num">差額</span></div>
         ${open.map(row).join('')}${done.map(row).join('')}
       </div>
     </div>
-    <p class="note">差額は「売り金額 − 買い金額」で自動で計算します。左のチェックで決済済み（グレー）になり、売買日が空なら今日の日付が入ります。行をタップすると編集できます。表は左右にスクロールできます。右上の「＋」で追加します。</p>`;
+    <p class="note">ビットコイン専用です。買値・売値は1BTCあたりの円の価格です。まだ売っていない行は、売値に今のビットコインの価格（${'現在'}と表示）が入り、差額には「今」売ったとしたときの差額が出ます（価格は開いている間、約30秒ごとに更新します）。売ったあとは、行を開いて売値・売り枚数を入れると差額が確定します。差額＝（売値 − 買値）× 売り枚数。左のチェックで決済済み（グレー）になります。表は左右にスクロールできます。</p>`;
 }
 function openTradeSheet(item) {
   const isNew = !item;
   let confirming = false;
   const sheet = openSheet(`
-    <div class="sheet-head"><h2>トレードを${isNew ? '追加' : '編集'}</h2>${closeBtn('tClose')}</div>
-    <label class="field" style="margin-top:0"><span class="flabel">銘柄・メモ（任意）</span><input id="tName" type="text" maxlength="20" autocomplete="off" placeholder="例：BTC、トヨタ"></label>
-    <label class="field"><span class="flabel">購入日（任意）</span><input id="tBd" type="date"></label>
-    <label class="field"><span class="flabel">売買日（任意）</span><input id="tSd" type="date"></label>
-    <label class="field"><span class="flabel">買い金額</span><span class="amount"><b>¥</b><input id="tBuy" type="text" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="買い金額"></span></label>
-    <label class="field"><span class="flabel">売り金額（売っていなければ空のまま）</span><span class="amount"><b>¥</b><input id="tSell" type="text" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="売り金額"></span></label>
+    <div class="sheet-head"><h2>トレードを${isNew ? '追加' : '編集'}（ビットコイン）</h2>${closeBtn('tClose')}</div>
+    <label class="field" style="margin-top:0"><span class="flabel">購入日（任意）</span><input id="tBd" type="date"></label>
+    <label class="field"><span class="flabel">買値（1BTCあたり・円）</span><span class="amount"><b>¥</b><input id="tBp" type="text" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="買値"></span></label>
+    <label class="field"><span class="flabel">買い枚数（BTC）</span><span class="amount"><b>BTC</b><input id="tBq" type="text" inputmode="decimal" autocomplete="off" placeholder="0.05" aria-label="買い枚数"></span></label>
+    <p class="note" id="tCost" style="margin:6px 4px 0;font-weight:600"></p>
+    <div class="section-title" style="font-size:15px;margin:22px 4px 0">売ったとき（売っていなければ空のまま）</div>
+    <label class="field" style="margin-top:8px"><span class="flabel">売買日（任意）</span><input id="tSd" type="date"></label>
+    <label class="field"><span class="flabel">売値（1BTCあたり・円）</span><span class="amount"><b>¥</b><input id="tSp" type="text" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="売値"></span></label>
+    <div style="margin-top:6px"><button type="button" class="chip small" id="tNow">今の価格を入れる</button><span class="note" id="tNowNote" style="margin-left:8px"></span></div>
+    <label class="field"><span class="flabel">売り枚数（BTC・空なら買い枚数と同じ）</span><span class="amount"><b>BTC</b><input id="tSq" type="text" inputmode="decimal" autocomplete="off" placeholder="" aria-label="売り枚数"></span></label>
     <p class="note" id="tPrev" style="margin:8px 4px 0;font-weight:600"></p>
     <div class="sheet-foot"><p class="err" id="tErr" role="alert" style="min-height:0;margin:0 0 6px"></p><div id="tActions"></div></div>`, `トレードを${isNew ? '追加' : '編集'}`);
   const $t = id => sheet.querySelector(id);
   const setErr = m => { $t('#tErr').textContent = m || ''; };
-  if (item) { $t('#tName').value = item.name; $t('#tBd').value = item.bd; $t('#tSd').value = item.sd; $t('#tBuy').value = String(item.buy); $t('#tSell').value = item.sell === null ? '' : String(item.sell); }
+  if (item) { $t('#tBd').value = item.bd; $t('#tSd').value = item.sd; $t('#tBp').value = String(item.bp); $t('#tBq').value = String(item.bq); $t('#tSp').value = item.sp === null ? '' : String(item.sp); $t('#tSq').value = item.sq === null ? '' : String(item.sq); }
+  const nowP = () => btcNow();
+  $t('#tNowNote').textContent = nowP() ? `現在 ${yen(nowP().p)}` : '価格を取得できていません';
+  const num = id => { const v = parseFloat($t(id).value); return Number.isFinite(v) ? v : null; };
   const paintPrev = () => {
-    const b = $t('#tBuy').value, s = $t('#tSell').value;
-    $t('#tPrev').textContent = b !== '' && s !== '' ? `差額（売り − 買い）＝ ${signedYen(Number(s) - Number(b))}` : '';
+    const bp = num('#tBp'), bq = num('#tBq'), sp = num('#tSp');
+    $t('#tCost').textContent = bp !== null && bq !== null ? `買い金額（買値 × 枚数）＝ ${yen(Math.round(bp * bq))}` : '';
+    if (bp !== null && bq !== null && sp !== null) {
+      const sq = num('#tSq') ?? bq;
+      $t('#tPrev').textContent = `売り金額 ${yen(Math.round(sp * sq))} ／ 差額（売値 − 買値）× 売り枚数 ＝ ${signedYen(Math.round((sp - bp) * sq))}`;
+    } else if (bp !== null && bq !== null && nowP()) {
+      $t('#tPrev').textContent = `今の価格で売ると、差額は ${signedYen(Math.round((nowP().p - bp) * bq))}`;
+    } else $t('#tPrev').textContent = '';
   };
   function save() {
-    const buy = $t('#tBuy').value;
-    if (buy === '') { setErr('買い金額を入力してください。'); return; }
-    const sell = $t('#tSell').value;
-    const out = cleanTrade({id: isNew ? 't' + uid() : item.id, name: $t('#tName').value, bd: $t('#tBd').value, sd: $t('#tSd').value, buy: Number(buy), sell: sell === '' ? null : Number(sell), done: isNew ? false : item.done, u: Date.now()});
-    if (!out) { setErr('金額を確認してください。'); return; }
+    const bp = num('#tBp'), bq = num('#tBq');
+    if (bp === null) { setErr('買値（1BTCあたりの円）を入力してください。'); return; }
+    if (bq === null || bq <= 0) { setErr('買い枚数を入力してください。'); return; }
+    const sp = num('#tSp');
+    const out = cleanTrade({id: isNew ? 't' + uid() : item.id, bd: $t('#tBd').value, sd: $t('#tSd').value, bp, bq, sp, sq: sp === null ? null : num('#tSq'), done: isNew ? false : item.done, u: Date.now()});
+    if (!out) { setErr('金額・枚数を確認してください。'); return; }
     S.trades = isNew ? [...S.trades, out] : S.trades.map(x => x.id === out.id ? out : x);
     saveMeta(); scheduleSync(); closeSheet(); toast('保存しました'); render();
   }
   const paintActions = () => {
     const box = $t('#tActions');
     if (confirming) {
-      box.innerHTML = `<div class="confirm"><p><b>「${esc(item.name || 'このトレード')}」を削除しますか？</b></p><div class="actions"><button type="button" class="btn" id="tNo">やめる</button><button type="button" class="btn danger solid primary" id="tYes">削除する</button></div></div>`;
+      box.innerHTML = `<div class="confirm"><p><b>このトレードを削除しますか？</b></p><div class="actions"><button type="button" class="btn" id="tNo">やめる</button><button type="button" class="btn danger solid primary" id="tYes">削除する</button></div></div>`;
       box.querySelector('#tNo').onclick = () => { confirming = false; paintActions(); };
       box.querySelector('#tYes').onclick = () => { S.trades = S.trades.filter(x => x.id !== item.id); S.idels[item.id] = {k:'trade', t:Date.now()}; saveMeta(); scheduleSync(); closeSheet(); toast('削除しました'); render(); };
     } else {
@@ -1621,11 +1661,13 @@ function openTradeSheet(item) {
   };
   sheet.oninput = e => {
     setErr('');
-    if (e.target.id === 'tBuy' || e.target.id === 'tSell') { const v = numClean(e.target.value, 0).slice(0, 12); if (e.target.value !== v) e.target.value = v; paintPrev(); }
+    const id = e.target.id;
+    if (id === 'tBp' || id === 'tSp') { const v = numClean(e.target.value, 0).slice(0, 11); if (e.target.value !== v) e.target.value = v; paintPrev(); }
+    else if (id === 'tBq' || id === 'tSq') { const v = numClean(e.target.value, 8).slice(0, 14); if (e.target.value !== v) e.target.value = v; paintPrev(); }
   };
+  $t('#tNow').onclick = () => { if (!nowP()) { setErr('今の価格を取得できていません。少し待ってからお試しください。'); return; } $t('#tSp').value = String(Math.round(nowP().p)); if (!$t('#tSd').value) $t('#tSd').value = todayStr(); setErr(''); paintPrev(); };
   $t('#tClose').onclick = closeSheet;
   paintPrev(); paintActions();
-  if (isNew) setTimeout(() => { try { $t('#tName').focus(); } catch (err) {} }, 60);
 }
 
 /* ===== 入力シート ===== */
@@ -2898,6 +2940,7 @@ document.addEventListener('click', e => {
     case 'addtrade': openTradeSheet(null); break;
     case 'edittrade': { const t = S.trades.find(x => x.id === el.dataset.id); if (t) openTradeSheet(t); break; }
     case 'toggletrade': toggleTrade(el.dataset.id); break;
+    case 'trade-refresh': refreshPrices(true); break;
     case 'editentry': { const e = S.entries.find(x => x.id === el.dataset.id); if (e) openEntrySheet(e); break; }
     case 'toggleentry': toggleEntry(el.dataset.id); break;
     case 'acctowner': ui.acctOwner = v; renderAcct(); break;
@@ -2952,6 +2995,7 @@ window.__kk = {get S() { return S; }, ui, store, syncNow, parseReceipt, parseMon
 
 render();
 initStore().then(() => { materializeRecurring(); render(); if (syncOn() && S.sync.auto) setTimeout(() => syncNow({silent:true}), 1500); });
+setInterval(() => { if (ui.tab === 'trade' && document.visibilityState === 'visible' && store.loaded && S.trades.length && $('#overlay').hidden) refreshPrices(false, TRADE_TTL); }, 15000);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && store.loaded) { materializeRecurring(); updateEntryBadge(); if (ui.tab === 'entry') renderEntries(); } });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && store.loaded && syncOn() && S.sync.auto && (!S.sync.last || Date.now() - S.sync.last > 5 * 60 * 1000)) syncNow({silent:true});
