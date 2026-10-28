@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '1.12.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -38,7 +38,7 @@ const cashflow = x => x.t === 'i' ? x.a : -x.a;   // 収入は+、支出は−�
 /* ===== 状態 ===== */
 let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], pointNames: [], entries: [], idels: {}, prices: {}, recSkips: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
 const store = { mode: 'init', persisted: null, error: false, loaded: false };
-const ui = { sCat:'all', acctOwner:'all', tab:'home', month:curMonth(), filter:'all', q:'', aType:'e', aBy:'cat', setType:'e', lastPay:'cash', lastType:'e' };
+const ui = { acctOpen:{}, sel:null, sCat:'all', acctOwner:'all', tab:'home', month:curMonth(), filter:'all', q:'', aType:'e', aBy:'cat', setType:'e', lastPay:'cash', lastType:'e' };
 
 const catById = id => S.cats.find(c => c.id === id) || {id, name:'未分類', color:'#8A8F98', type:'e'};
 const payById = id => S.pays.find(p => p.id === id) || {id, name:'その他', color:'#8A8F98'};
@@ -744,15 +744,17 @@ function isIos() { return /iPhone|iPad|iPod/.test(navigator.userAgent) || (navig
 const DAY = 86400000;
 
 function render() {
+  if (ui.tab !== 'home') ui.sel = null;
   renderBar(); updateEntryBadge();
   for (const id of ['home','stats','acct','entry','set']) $('#v-' + id).hidden = ui.tab !== id;
   document.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-current', b.dataset.tab === ui.tab ? 'page' : 'false'));
-  $('#fabwrap').hidden = ui.tab === 'set' || ui.tab === 'acct' || ui.tab === 'entry';
+  $('#fabwrap').hidden = ui.tab === 'set' || ui.tab === 'acct' || ui.tab === 'entry' || !!ui.sel;
   if (ui.tab === 'home') { renderBanner(); renderSummary(); renderFilter(); renderList(); }
   else if (ui.tab === 'stats') renderStats();
   else if (ui.tab === 'acct') { renderAcct(); refreshPrices(false); }
   else if (ui.tab === 'entry') renderEntries();
   else renderSettings();
+  renderSelBar();
 }
 
 function renderBar() {
@@ -822,8 +824,73 @@ function renderFilter() {
   $('#toolbar').hidden = store.loaded && realCount() === 0;
 }
 
+/* ===== 選択して削除 ===== */
+function renderSelBar() {
+  const bar = $('#selbar');
+  const on = !!ui.sel && ui.tab === 'home';
+  bar.hidden = !on;
+  $('#selBtn').setAttribute('aria-pressed', String(on));
+  if (!on) { bar.innerHTML = ''; return; }
+  const n = ui.sel.size, all = (ui.shownIds || []).length;
+  bar.innerHTML = `<div class="selin">
+    <button type="button" class="btn small" data-act="selall">${n && n === all ? '選択を解除' : '全て選択'}</button>
+    <span class="selcnt"><b>${n}</b>件 選択中</span>
+    <button type="button" class="btn danger small" data-act="seldel"${n ? '' : ' disabled'}>削除</button>
+    <button type="button" class="btn small" data-act="selmode">やめる</button>
+  </div>`;
+}
+function deleteMany(txs) {
+  const months = new Set(), t = Date.now();
+  for (const tx of txs) {
+    const k = tx.d.slice(0, 7);
+    S.months[k] = (S.months[k] || []).filter(x => x.id !== tx.id);
+    if (!S.months[k].length) delete S.months[k];
+    S.dels[tx.id] = t;
+    if (tx.rid) S.recSkips[tx.id] = 1;     // 毎月の支払いを削除した月は、自動で作り直さない
+    months.add(k);
+  }
+  months.forEach(k => saveMonth(k));
+  saveMeta();
+  scheduleSync();
+}
+function restoreMany(txs) {
+  const months = new Set(), t = Date.now();
+  for (const tx of txs) {
+    delete S.dels[tx.id]; delete S.recSkips[tx.id];
+    tx.u = t;
+    const k = tx.d.slice(0, 7);
+    (S.months[k] = S.months[k] || []).push(tx);
+    months.add(k);
+  }
+  months.forEach(k => saveMonth(k));
+  saveMeta();
+  scheduleSync();
+}
+function openSelDelete() {
+  const txs = [...ui.sel].map(findTx).filter(Boolean);
+  if (!txs.length) return;
+  const ex = txs.filter(x => x.t === 'e').reduce((s, x) => s + x.a, 0), inc = txs.filter(x => x.t === 'i').reduce((s, x) => s + x.a, 0);
+  const ds = txs.map(x => x.d).sort();
+  const hasRec = txs.some(x => x.rid);
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>選んだ記録を削除</h2>${closeBtn('dClose')}</div>
+    <div class="card"><dl class="kv"><dt>件数</dt><dd>${txs.length.toLocaleString('ja-JP')}件</dd><dt>期間</dt><dd>${esc(fmtYMD(ds[0]))}${ds[0] === ds[ds.length - 1] ? '' : ' 〜 ' + esc(fmtYMD(ds[ds.length - 1]))}</dd>${ex ? `<dt>支出の合計</dt><dd>${yen(ex)}</dd>` : ''}${inc ? `<dt>収入の合計</dt><dd>${yen(inc)}</dd>` : ''}</dl></div>
+    <p class="err" style="min-height:0;margin-top:14px"><b>${txs.length.toLocaleString('ja-JP')}件の記録を削除します。</b>スプレッドシートと同期している場合は、他の端末からも消えます。</p>
+    ${hasRec ? '<p class="note" style="margin-left:0">「毎月」の記録を含みます。削除した月は、自動では作り直されません。</p>' : ''}
+    <div class="sheet-foot"><div class="actions"><button type="button" class="btn" id="dNo">やめる</button><button type="button" class="btn danger solid primary" id="dYes">削除する</button></div></div>`, '選んだ記録を削除');
+  sheet.querySelector('#dClose').onclick = sheet.querySelector('#dNo').onclick = closeSheet;
+  sheet.querySelector('#dYes').onclick = () => {
+    deleteMany(txs);
+    ui.sel = null;
+    closeSheet(); render();
+    toast(`${txs.length.toLocaleString('ja-JP')}件を削除しました`, {action:'元に戻す', ms:8000, fn: () => { restoreMany(txs); render(); toast('元に戻しました'); }});
+  };
+}
+
 function renderList() {
   const box = $('#list');
+  const prevSel = ui.sel;
+  ui.shownIds = []; if (ui.sel) ui.sel = new Set();     // 表示されていない記録は選択に残さない（下で、表示中の分だけ戻す）
   if (!store.loaded) { box.innerHTML = ''; return; }
   if (realCount() === 0) {
     box.innerHTML = `
@@ -850,6 +917,8 @@ function renderList() {
     return;
   }
   const shown = list.slice(0, 400);
+  ui.shownIds = shown.map(x => x.id);
+  if (prevSel) { const ids = new Set(ui.shownIds); ui.sel = new Set([...prevSel].filter(id => ids.has(id))); }
   const groups = [];
   for (const x of shown) {
     const g = groups[groups.length - 1];
@@ -866,8 +935,9 @@ function renderList() {
       const c = catById(x.c);
       const sub = [x.n, payName(x.p)].filter(Boolean).join(' · ');
       const cf = cashflow(x);
-      return `<button type="button" class="row" data-act="edit" data-id="${esc(x.id)}">
-        <i class="dot" style="background:${c.color}"></i>
+      const on = ui.sel && ui.sel.has(x.id);
+      return `<button type="button" class="row${ui.sel ? ' selrow' : ''}" data-act="${ui.sel ? 'selrow' : 'edit'}" data-id="${esc(x.id)}"${ui.sel ? ` aria-pressed="${!!on}"` : ''}>
+        ${ui.sel ? `<span class="selbox" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>` : `<i class="dot" style="background:${c.color}"></i>`}
         <span class="main"><span class="cat">${esc(c.name)}</span><span class="sub">${x.rec ? '<span class="otag">毎月</span>' : ''}${esc(sub)}</span></span>
         <span class="amt${cf > 0 ? ' inc' : ''}">${cf > 0 ? '+' : '−'}${yen(x.a)}</span>
       </button>`;
@@ -1047,9 +1117,9 @@ function renderSettings() {
 const ACCT_PRESETS = ['三井住友銀行','PayPay銀行','楽天銀行','ゆうちょ銀行','三菱UFJ銀行','みずほ銀行','現金（手元）'];
 const POINT_PRESETS = ['楽天ポイント','Vポイント','PayPayポイント','dポイント','WAONポイント'];   // 1ポイント＝1円として評価
 const OWNERS = {h:'夫', w:'妻', j:'共有', '':'未設定'};
-const KINDS = {cash:'預貯金・現金', stock:'株式', btc:'ビットコイン', eth:'イーサリアム', point:'ポイント'};
+const KINDS = {cash:'預貯金', stock:'株', btc:'ビットコイン', eth:'イーサリアム', point:'ポイント'};
 const COINS = {btc:{name:'ビットコイン', sym:'BTC', bf:'BTC_JPY', cg:'bitcoin'}, eth:{name:'イーサリアム', sym:'ETH', bf:'ETH_JPY', cg:'ethereum'}};
-const KIND_GROUPS = [['cash','預貯金・現金'], ['stock','株式'], ['crypto','暗号資産'], ['point','ポイント']];
+const KIND_GROUPS = [['cash','預貯金'], ['stock','株'], ['crypto','暗号資産'], ['point','ポイント']];
 const groupOf = k => COINS[k] ? 'crypto' : k;
 const PRICE_TTL = 5 * 60 * 1000;
 /* 1つの資産のいまの評価額（円）。預貯金は残高、株式は株数×株価、暗号資産は保有数量×取得済みの価格 */
@@ -1131,7 +1201,7 @@ function renderAcct() {
     box.innerHTML = `
       <div class="welcome card">
         <h2>現資産を登録しましょう</h2>
-        <p>預貯金・現金、株式、ビットコイン・イーサリアム、ポイントを、夫・妻の持ち主ごとに登録すると、どこにいくらあるかを一覧で見られます。収入・支出の記録とは別に保存されます。</p>
+        <p>預貯金、株、暗号資産（ビットコイン・イーサリアム）、ポイントを、夫・妻の持ち主ごとに登録すると、どこにいくらあるかを一覧で見られます。収入・支出の記録とは別に保存されます。</p>
         <div class="chips">${ACCT_PRESETS.slice(0, 5).map(n => `<button type="button" class="chip" data-act="acctpreset" data-name="${esc(n)}">${esc(n)}</button>`).join('')}</div>
         <button type="button" class="btn primary" data-act="addacct">資産を追加する</button>
       </div>`;
@@ -1148,8 +1218,6 @@ function renderAcct() {
   const ownerSplit = f === 'all'
     ? `<div class="split" style="grid-template-columns:repeat(${ownerKeys.length},minmax(0,1fr))">${ownerKeys.map(k => `<div><span class="lbl">${OWNERS[k]}</span><b>${yen(sumBy(a => a.owner === k))}</b></div>`).join('')}</div>`
     : '';
-  const kindLines = KIND_GROUPS.filter(([gk]) => base.some(a => groupOf(a.kind) === gk))
-    .map(([gk, gn]) => `<dt>${gn}</dt><dd>${yen(base.filter(a => groupOf(a.kind) === gk).reduce((sum, a) => sum + acctValue(a), 0))}</dd>`).join('');
   const coinKinds = Object.keys(COINS).filter(k => S.accts.some(a => a.kind === k));
   const latestPrice = Math.max(0, ...coinKinds.map(k => S.prices[k] ? S.prices[k].t : 0));
   const priceBox = coinKinds.length ? `
@@ -1158,8 +1226,9 @@ function renderAcct() {
       <div style="margin-top:8px"><button type="button" class="chip small" data-act="acct-refresh"${priceBusy ? ' disabled' : ''}>価格を更新</button></div>` : '';
   const groups = KIND_GROUPS.map(([gk, gn]) => {
     const items = base.filter(a => groupOf(a.kind) === gk).sort((a, b) => acctValue(b) - acctValue(a) || a.name.localeCompare(b.name, 'ja'));
-    if (!items.length) return '';
     const sub = items.reduce((sum, a) => sum + acctValue(a), 0);
+    const gpct = total > 0 ? Math.round(sub / total * 100) : 0;
+    const open = ui.acctOpen[gk] !== false;
     const rows = items.map(a => {
       const v = acctValue(a), pct = total > 0 ? Math.round(v / total * 100) : 0;
       return `<button type="button" class="row" data-act="editacct" data-id="${esc(a.id)}">
@@ -1169,7 +1238,15 @@ function renderAcct() {
       <span class="rbar" style="grid-column:1 / -1;display:block;margin-top:0"><i style="width:${v > 0 ? Math.max(pct, 2) : 0}%;background:${esc(a.color)}"></i></span>
     </button>`;
     }).join('');
-    return `<div class="day"><div class="dayhead"><span>${gn}</span><span class="num">${yen(sub)}</span></div><div class="rows">${rows}</div></div>`;
+    const bodyHtml = !open ? '' : items.length ? `<div class="rows">${rows}</div>` : `<div class="empty acg-empty">登録なし（右の「＋」で追加）</div>`;
+    return `<div class="acg">
+      <div class="acghead">
+        <button type="button" class="acgtoggle" data-act="acctgrp" data-v="${gk}" aria-expanded="${open}"><svg class="i chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg><span class="acgname">${gn}</span><span class="acgcnt">${items.length}件</span></button>
+        <span class="acgsum"><b class="num">${yen(sub)}</b><small>${gpct}%</small></span>
+        <button type="button" class="icon-btn sm" data-act="addacct" data-kind="${gk}" aria-label="${gn}を追加"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+      </div>
+      ${bodyHtml}
+    </div>`;
   }).join('');
   box.innerHTML = `
     ${seg}
@@ -1177,21 +1254,20 @@ function renderAcct() {
       <div class="lbl">${f === 'all' ? '現資産の合計' : OWNERS[f] + 'の現資産'}</div>
       <div class="big">${yen(total)}</div>
       ${ownerSplit}
-      ${kindLines ? `<dl class="kv" style="margin-top:12px">${kindLines}</dl>` : ''}
       ${priceBox}
     </div>
     ${groups}
     <p class="note">資産の追加は、右上の「＋」から行います。残高や数量が変わったら、その資産をタップして更新してください。株式の株価は手入力です。ビットコイン・イーサリアムの価格は自動で取得します（円換算）。ポイントは1ポイント＝1円として合計に含めます。ここの金額は収入・支出の記録には影響しません。</p>`;
 }
 
-function openAcctSheet(item, preset) {
+function openAcctSheet(item, preset, initKind) {
   const isNew = !item;
   const nameList = () => [...new Set([...ACCT_PRESETS, ...S.acctNames])];
   const d = item ? {...item} : {id:'a' + uid()};
   const st = item
     ? {kind:item.kind, owner:item.owner, nameSel:'', name:item.name, bal:(item.kind === 'cash' || item.kind === 'point') ? String(item.bal) : '', qty:item.qty ? String(item.qty) : '',
        price:item.kind === 'stock' ? (item.price ? String(item.price) : '') : (COINS[item.kind] && S.prices[item.kind] ? String(S.prices[item.kind].p) : ''), note:item.note, color:item.color}
-    : {kind:'cash', owner:(ui.acctOwner === 'h' || ui.acctOwner === 'w' || ui.acctOwner === 'j') ? ui.acctOwner : '', nameSel:'', name:preset || '', bal:'', qty:'', price:'', note:'', color:PAL[S.accts.length % PAL.length]};
+    : (() => { const k0 = initKind === 'crypto' ? 'btc' : (KINDS[initKind] ? initKind : 'cash'); return {kind:k0, owner:(ui.acctOwner === 'h' || ui.acctOwner === 'w' || ui.acctOwner === 'j') ? ui.acctOwner : '', nameSel:'', name:preset || '', bal:'', qty:'', price:COINS[k0] && S.prices[k0] ? String(S.prices[k0].p) : '', note:'', color:PAL[S.accts.length % PAL.length]}; })();
   const isNamed = k => k === 'cash' || k === 'point';       // 一覧から名前を選ぶ種類（口座名・ポイント名）
   const namesFor = k => k === 'point' ? [...new Set([...POINT_PRESETS, ...S.pointNames])] : nameList();
   if (isNamed(st.kind) && st.name) st.nameSel = namesFor(st.kind).includes(st.name) ? st.name : '+';
@@ -2681,7 +2757,11 @@ document.addEventListener('click', e => {
     case 'tab': ui.tab = el.dataset.tab; render(); window.scrollTo(0, 0); break;
     case 'add': openTxSheet(null); break;
     case 'edit': { const tx = findTx(el.dataset.id); if (tx) openTxSheet(tx); break; }
-    case 'filter': ui.filter = v; renderFilter(); renderList(); break;
+    case 'filter': ui.filter = v; renderFilter(); renderList(); renderSelBar(); break;
+    case 'selmode': ui.sel = ui.sel ? null : new Set(); render(); break;
+    case 'selrow': { const id = el.dataset.id; if (ui.sel.has(id)) ui.sel.delete(id); else ui.sel.add(id); renderList(); renderSelBar(); break; }
+    case 'selall': { const all = ui.shownIds || []; ui.sel = ui.sel.size === all.length ? new Set() : new Set(all); renderList(); renderSelBar(); break; }
+    case 'seldel': openSelDelete(); break;
     case 'atype': ui.aType = v; renderStats(); break;
     case 'aby': ui.aBy = v; renderStats(); break;
     case 'srange': { const r = searchRange(v); ui.sFrom = r[0]; ui.sTo = r[1]; renderStats(); break; }
@@ -2691,7 +2771,8 @@ document.addEventListener('click', e => {
     case 'addcat': openNameSheet('cat', null, ui.setType); break;
     case 'editpay': { const p = S.pays.find(x => x.id === el.dataset.id); if (p) openNameSheet('pay', p); break; }
     case 'addpay': openNameSheet('pay', null); break;
-    case 'addacct': openAcctSheet(null); break;
+    case 'addacct': openAcctSheet(null, null, el.dataset.kind); break;
+    case 'acctgrp': ui.acctOpen[v] = ui.acctOpen[v] === false; renderAcct(); break;
     case 'addentry': openEntrySheet(null); break;
     case 'editentry': { const e = S.entries.find(x => x.id === el.dataset.id); if (e) openEntrySheet(e); break; }
     case 'toggleentry': toggleEntry(el.dataset.id); break;
@@ -2717,7 +2798,7 @@ document.addEventListener('change', e => {
   else if (t.id === 'sTo') { ui.sTo = t.value; renderStats(); }
   else if (t.id === 'sCat') { ui.sCat = t.value; renderStats(); }
 });
-$('#q').addEventListener('input', e => { ui.q = e.target.value; renderList(); });
+$('#q').addEventListener('input', e => { ui.q = e.target.value; renderList(); renderSelBar(); });
 $('#fileReceipt').addEventListener('change', e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; handleReceiptFile(f); });
 $('#fileCsv').addEventListener('change', e => { const fs = Array.from(e.target.files || []); e.target.value = ''; handleCsvFiles(fs); });
 $('#fileBackup').addEventListener('change', e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; handleBackupFile(f); });

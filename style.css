@@ -273,3 +273,30 @@ textarea{min-height:160px;font-family:var(--font-num);font-size:13px;line-height
 .srow input{width:100%}
 button.rank.sbtn{display:block;width:100%;text-align:left;background:none;border:0;border-radius:8px;color:inherit;font:inherit;cursor:pointer}
 button.rank.sbtn+button.rank.sbtn{border-top:1px solid var(--line)}
+
+/* 現資産：大カテゴリ */
+.acg{margin-top:16px}
+.acghead{display:flex;align-items:center;gap:8px;padding:0 0 6px 4px}
+.acgtoggle{display:flex;align-items:center;gap:6px;flex:1;min-width:0;min-height:40px;padding:0;margin:0;background:none;border:0;color:var(--ink);font:inherit;cursor:pointer;text-align:left}
+.acgtoggle .chev{width:18px;height:18px;color:var(--muted);transition:transform .15s;transform:rotate(90deg);flex:none}
+.acgtoggle[aria-expanded="false"] .chev{transform:none}
+.acgname{font-family:var(--font-display);font-size:17px;font-weight:700}
+.acgcnt{color:var(--muted);font-size:12.5px}
+.acgsum{display:flex;align-items:baseline;gap:6px;white-space:nowrap}
+.acgsum b{font-weight:700}
+.acgsum small{color:var(--muted);font-size:12px}
+.acg-empty{padding:14px 8px;background:var(--surface);border:1px solid var(--line);border-radius:14px}
+
+/* 家計簿：選択して削除 */
+.searchrow{display:flex;gap:8px;align-items:center}
+.searchrow input{flex:1;min-width:0}
+.searchrow .chip{flex:none;min-height:44px}
+.selbar{position:fixed;left:0;right:0;bottom:calc(76px + env(safe-area-inset-bottom,0px));z-index:16;padding:0 max(16px,env(safe-area-inset-right,0px)) 0 max(16px,env(safe-area-inset-left,0px));pointer-events:none}
+.selin{pointer-events:auto;max-width:560px;margin:0 auto;display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow)}
+.selin .btn.small{min-height:40px;padding:0 12px;font-size:14px;white-space:nowrap}
+.selcnt{flex:1;text-align:center;font-size:13px;color:var(--muted);white-space:nowrap}
+.selcnt b{color:var(--ink);font-size:17px}
+.row.selrow .selbox{display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:7px;border:2px solid var(--muted);color:transparent;flex:none}
+.row.selrow .selbox svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+.row.selrow[aria-pressed="true"] .selbox{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.row.selrow[aria-pressed="true"]{background:var(--accent-soft)}

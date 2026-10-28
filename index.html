@@ -40,7 +40,10 @@
           <button type="button" data-act="filter" data-v="e" aria-pressed="false">支出</button>
           <button type="button" data-act="filter" data-v="i" aria-pressed="false">収入</button>
         </div>
-        <input type="search" id="q" placeholder="メモ・カテゴリで検索" aria-label="検索" autocomplete="off" enterkeyhint="search">
+        <div class="searchrow">
+          <input type="search" id="q" placeholder="メモ・カテゴリで検索" aria-label="検索" autocomplete="off" enterkeyhint="search">
+          <button type="button" class="chip" id="selBtn" data-act="selmode" aria-pressed="false">選択</button>
+        </div>
       </div>
       <div id="list"></div>
     </section>
@@ -72,6 +75,8 @@
     </section>
   </main>
 </div>
+
+<div class="selbar" id="selbar" hidden></div>
 
 <div class="fabwrap" id="fabwrap"><div class="fabin">
   <button class="fab alt" data-act="receipt"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7a2 2 0 0 1 2-2h2l1.2-1.6h5.6L16 5h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><circle cx="12" cy="12" r="3.4"/></svg>レシート</button>
