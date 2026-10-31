@@ -33,20 +33,14 @@
   <main>
     <section id="v-home" aria-label="家計簿">
       <div id="banner"></div>
-      <div class="homehead">
-        <div id="summary"></div>
-        <button type="button" class="icon-btn sm gear" id="gearBtn" data-act="tab" data-tab="set" aria-label="設定"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
-      </div>
+      <div id="summary"></div>
       <div class="toolbar" id="toolbar">
         <div class="seg" id="filterSeg" role="group" aria-label="表示する種類">
           <button type="button" data-act="filter" data-v="all" aria-pressed="true">すべて</button>
           <button type="button" data-act="filter" data-v="e" aria-pressed="false">支出</button>
           <button type="button" data-act="filter" data-v="i" aria-pressed="false">収入</button>
         </div>
-        <div class="searchrow">
-          <input type="search" id="q" placeholder="メモ・カテゴリで検索" aria-label="検索" autocomplete="off" enterkeyhint="search">
-          <button type="button" class="chip" id="selBtn" data-act="selmode" aria-pressed="false">選択</button>
-        </div>
+        <input type="search" id="q" placeholder="メモ・カテゴリで検索" aria-label="検索" autocomplete="off" enterkeyhint="search">
       </div>
       <div id="list"></div>
     </section>
@@ -65,25 +59,14 @@
       <div id="stats"></div>
     </section>
 
-    <section id="v-acct" aria-label="現資産" hidden>
-      <div id="acct"></div>
+    <section id="v-assets" aria-label="現資産" hidden>
+      <div id="assets"></div>
     </section>
-
-    <section id="v-entry" aria-label="エントリー" hidden>
-      <div id="entry"></div>
-    </section>
-
-    <section id="v-trade" aria-label="トレード" hidden>
-      <div id="trade"></div>
-    </section>
-
     <section id="v-set" aria-label="設定" hidden>
       <div id="settings"></div>
     </section>
   </main>
 </div>
-
-<div class="selbar" id="selbar" hidden></div>
 
 <div class="fabwrap" id="fabwrap"><div class="fabin">
   <button class="fab alt" data-act="receipt"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7a2 2 0 0 1 2-2h2l1.2-1.6h5.6L16 5h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><circle cx="12" cy="12" r="3.4"/></svg>レシート</button>
@@ -94,9 +77,8 @@
   <div class="tabin">
     <button class="tab" data-act="tab" data-tab="home"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h11.5a1 1 0 0 1 1 1V20H7a2 2 0 0 1-2-2V4.5a1 1 0 0 1 1-1z"/><path d="M9 8h6M9 12h6"/></svg>家計簿</button>
     <button class="tab" data-act="tab" data-tab="stats"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20v-7M12 20V5M19 20V10"/></svg>分析</button>
-    <button class="tab" data-act="tab" data-tab="acct"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10l9-6 9 6"/><path d="M5 10v7M9.5 10v7M14.5 10v7M19 10v7M3 20h18"/></svg>現資産</button>
-    <button class="tab" data-act="tab" data-tab="entry"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12.5l2.5 2.5 4.5-5.5"/></svg>エントリー</button>
-    <button class="tab" data-act="tab" data-tab="trade"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>トレード</button>
+    <button class="tab" data-act="tab" data-tab="assets"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="6.5" width="17" height="12" rx="2"/><path d="M3.5 10.5h17M16 14.5h1.5"/></svg>資産</button>
+    <button class="tab" data-act="tab" data-tab="set"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>設定</button>
   </div>
 </nav>
 
