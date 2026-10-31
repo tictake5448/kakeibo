@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.15.0';
+const APP_VERSION = '1.16.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -267,11 +267,37 @@ async function initStore() {
   askPersist();
 }
 
+/* ===== ポイントの支払い連動：支払方法の名前＝ポイントの名前なら、記録に合わせてポイント残高を増減する =====
+   残高を最後に更新した日以降の記録だけが対象（それ以前の分は入力した残高に含まれている前提） */
+const ymdOf = u => { const d = new Date(u); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+const pointAcctOf = tx => {
+  if (!tx || !tx.p) return null;
+  const pn = S.pays.find(p => p.id === tx.p);
+  return pn ? S.accts.find(a => a.kind === 'point' && a.name === pn.name) || null : null;
+};
+const pointCounts = (a, tx) => tx.d >= (a.u ? ymdOf(a.u) : '0000-00-00');
+/* sign=+1: 記録を足す / -1: 取り消す。変えたら true */
+function pointAdjust(tx, sign) {
+  const a = pointAcctOf(tx);
+  if (!a || !pointCounts(a, tx)) return false;
+  const nb = Math.max(0, a.bal + sign * (tx.t === 'i' ? tx.a : -tx.a));
+  if (nb === a.bal) return false;
+  a.bal = nb; a.m = Date.now();
+  return true;
+}
+function ensurePointPays() {
+  let ch = false;
+  for (const a of S.accts) if (a.kind === 'point' && !S.pays.some(p => p.name === a.name)) { S.pays.push({id:'p' + uid(), name:a.name, color:a.color}); ch = true; }
+  return ch;
+}
+
 /* ===== データ操作 ===== */
 let lastBatch = null;
 function saveTx(tx, orig) {
   tx.u = Date.now();
   delete S.dels[tx.id];
+  const pch = (orig ? pointAdjust(orig, -1) : false) | pointAdjust(tx, 1);
+  if (pch) { saveMeta(); }
   if (orig) {
     const ok = orig.d.slice(0,7);
     S.months[ok] = (S.months[ok] || []).filter(x => x.id !== orig.id);
@@ -284,6 +310,7 @@ function saveTx(tx, orig) {
   scheduleSync();
 }
 function deleteTx(orig) {
+  pointAdjust(orig, -1);
   const ok = orig.d.slice(0,7);
   S.months[ok] = (S.months[ok] || []).filter(x => x.id !== orig.id);
   saveMonth(ok);
@@ -297,14 +324,16 @@ function addBatch(txs, created) {
   const months = new Set();
   const ids = new Set();
   const nowU = Date.now();
+  let pch = false;
   for (const tx of txs) {
     tx.u = nowU;
+    if (pointAdjust(tx, 1)) pch = true;
     const k = tx.d.slice(0,7);
     (S.months[k] = S.months[k] || []).push(tx);
     months.add(k); ids.add(tx.id);
   }
   months.forEach(k => saveMonth(k));
-  if (created && (created.cats.length || created.pays.length)) saveMeta();
+  if (pch || (created && (created.cats.length || created.pays.length))) saveMeta();
   askPersist();
   scheduleSync();
   lastBatch = {ids, months, created: created || {cats:[], pays:[]}};
@@ -314,6 +343,7 @@ function undoBatch(b) {
   if (!b) return;
   const tnow = Date.now();
   for (const id of b.ids) S.dels[id] = tnow;
+  for (const k of b.months) for (const x of (S.months[k] || [])) if (b.ids.has(x.id)) pointAdjust(x, -1);
   if (b.rec) for (const id of b.ids) S.recSkips[id] = 1;     // 「毎月」の自動記録を取り消したときも、同じ月は作り直さない
   saveMeta();
   scheduleSync();
@@ -1149,7 +1179,7 @@ function renderSettings() {
 }
 /* ===== 現資産（預貯金・株式・暗号資産。収入・支出とは別に、いまの資産を持つ） ===== */
 const ACCT_PRESETS = ['三井住友銀行','PayPay銀行','楽天銀行','ゆうちょ銀行','三菱UFJ銀行','みずほ銀行','現金（手元）'];
-const POINT_PRESETS = ['楽天ポイント','Vポイント','PayPayポイント','dポイント','WAONポイント'];   // 1ポイント＝1円として評価
+const POINT_PRESETS = ['楽天ポイント','Vポイント','dポイント','ANA','JAL','PayPayポイント','WAONポイント'];   // 1ポイント＝1円として評価
 const OWNERS = {h:'夫', w:'妻', j:'共有', '':'未設定'};
 const KINDS = {cash:'預貯金', stock:'株', btc:'ビットコイン', eth:'イーサリアム', point:'ポイント'};
 const COINS = {btc:{name:'ビットコイン', sym:'BTC', bf:'BTC_JPY', cg:'bitcoin'}, eth:{name:'イーサリアム', sym:'ETH', bf:'ETH_JPY', cg:'ethereum'}};
@@ -1408,6 +1438,7 @@ function openAcctSheet(item, preset, initKind) {
       if (k === 'point') S.pointNames = [...S.pointNames, out.name].slice(-40); else S.acctNames = [...S.acctNames, out.name].slice(-40);
     }
     S.accts = isNew ? [...S.accts, out] : S.accts.map(a => a.id === out.id ? out : a);
+    ensurePointPays();
     saveMeta(); scheduleSync(); closeSheet(); toast('保存しました'); render();
   }
   sheet.onclick = e => {
@@ -1709,6 +1740,7 @@ const payChips = (selected, orig) => {
 };
 
 function openTxSheet(orig) {
+  if (ensurePointPays()) saveMeta();
   const d = orig ? {...orig} : {d:defaultDate(), t:ui.lastType, c:null, a:0, p:S.pays.some(p => p.id === ui.lastPay) ? ui.lastPay : (S.pays[0] ? S.pays[0].id : ''), n:''};
   let confirming = false;
   const sheet = openSheet(`
@@ -1720,7 +1752,7 @@ function openTxSheet(orig) {
     <label class="field"><span class="flabel">金額</span><span class="amount"><b>¥</b><input id="fAmt" type="text" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="金額"></span></label>
     <div class="field"><span class="flabel">カテゴリ</span><div class="chips" id="fCats"></div></div>
     <label class="field"><span class="flabel">日付</span><input id="fDate" type="date"></label>
-    <div class="field"><span class="flabel">支払方法</span><div class="chips" id="fPays"></div></div>
+    <div class="field"><span class="flabel">支払方法</span><div class="chips" id="fPays"></div><p class="hint" id="fHint" hidden></p></div>
     <label class="field"><span class="flabel">メモ</span><input id="fMemo" type="text" maxlength="80" placeholder="例：スーパー" autocomplete="off"></label>
     <div id="fRecBox"></div>
     <p class="err" id="fErr" role="alert"></p>
@@ -1744,7 +1776,19 @@ function openTxSheet(orig) {
       ? items.map(c => `<button type="button" class="chip" data-c="${esc(c.id)}" aria-pressed="${c.id === d.c}"><i class="dot" style="background:${c.color}"></i>${esc(c.name)}</button>`).join('')
       : '<span class="muted">カテゴリがありません。設定から追加してください。</span>';
   };
-  const paintPays = () => { sheet.querySelector('#fPays').innerHTML = payChips(d.p, orig); };
+  const paintHint = () => {
+    const h = sheet.querySelector('#fHint'), a = pointAcctOf({p:d.p});
+    if (!a) { h.hidden = true; return; }
+    const amt = parseInt(normDigits(fAmt.value).replace(/\D/g, '') || '0', 10);
+    let cur = a.bal;
+    if (orig && pointAcctOf(orig) === a && pointCounts(a, orig)) cur -= (orig.t === 'i' ? orig.a : -orig.a);   // この記録の分は除いて計算
+    cur = Math.max(0, cur);
+    const after = cur + (d.t === 'i' ? amt : -amt);
+    h.hidden = false; h.className = 'hint' + (after < 0 ? ' low' : '');
+    h.innerHTML = `${esc(a.name)}の残高 <b>${cur.toLocaleString('ja-JP')} pt</b>${amt ? ` → <b class="after">${Math.max(0, after).toLocaleString('ja-JP')} pt</b>${after < 0 ? '（不足）' : ''}` : ''}`;
+  };
+  const paintPays = () => { sheet.querySelector('#fPays').innerHTML = payChips(d.p, orig); paintHint(); };
+  fAmt.addEventListener('input', paintHint);
   // 「毎月」のチェック（支出のみ）。同じ系列の最新の月でチェックを外すと停止する
   const series = orig && orig.rid ? latestOfSeries(orig.rid) : null;
   const notLatest = !!(series && series.id !== orig.id);
@@ -1813,7 +1857,7 @@ function openTxSheet(orig) {
   fAmt.addEventListener('input', () => { if (!composing) { fmtAmt(); err(''); } });
   fAmt.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); fAmt.blur(); } });
   sheet.querySelector('#fClose').onclick = closeSheet;
-  sheet.querySelector('#fType').onclick = e => { const b = e.target.closest('button[data-t]'); if (!b) return; d.t = b.dataset.t; d.c = null; paintHead(); paintCats(); paintRec(); err(''); };
+  sheet.querySelector('#fType').onclick = e => { const b = e.target.closest('button[data-t]'); if (!b) return; d.t = b.dataset.t; d.c = null; paintHead(); paintCats(); paintRec(); paintHint(); err(''); };
   sheet.querySelector('#fRecBox').onchange = e => { if (e.target.id === 'fRec') d.rec = e.target.checked; };
   sheet.querySelector('#fCats').onclick = e => { const b = e.target.closest('button[data-c]'); if (!b) return; d.c = b.dataset.c; paintCats(); err(''); };
   sheet.querySelector('#fPays').onclick = e => { const b = e.target.closest('button[data-p]'); if (!b) return; d.p = b.dataset.p; paintPays(); };
@@ -3021,7 +3065,7 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
 }
 
 /* 動作確認用（画面には影響しません） */
-window.__kk = {get S() { return S; }, ui, store, syncNow, parseReceipt, parseMoneyCsv, render, preprocessImage, runOcr};
+window.__kk = {get S() { return S; }, ui, store, saveMeta, syncNow, parseReceipt, parseMoneyCsv, render, preprocessImage, runOcr};
 
 render();
 initStore().then(() => { materializeRecurring(); render(); if (syncOn() && S.sync.auto) setTimeout(() => syncNow({silent:true}), 1500); });

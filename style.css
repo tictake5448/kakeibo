@@ -336,3 +336,7 @@ input[type=date]::-webkit-datetime-edit{padding:0}
 .etr.ttr.stk.ehead .c-title{background:var(--bg)}
 .etr.ttr.stk .c-run{position:static;background:none;padding-left:6px}
 .tgh{margin-top:6px}
+
+.hint{margin:8px 2px 0;font-size:13px;color:var(--muted)}
+.hint b{font-variant-numeric:tabular-nums;color:var(--text)}
+.hint.low b.after{color:#D9534F}
