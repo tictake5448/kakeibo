@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.15.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -36,9 +36,9 @@ const lsSet = (k,v) => { try { localStorage.setItem(k,v); } catch (e) {} };
 const cashflow = x => x.t === 'i' ? x.a : -x.a;   // 収入は+、支出は−（返金・値引きの負の支出は+になる）
 
 /* ===== 状態 ===== */
-let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null}, assets: [] };
+let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], pointNames: [], entries: [], trades: [], idels: {}, prices: {}, recSkips: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
 const store = { mode: 'init', persisted: null, error: false, loaded: false };
-const ui = { tab:'home', month:curMonth(), filter:'all', q:'', aType:'e', aBy:'cat', setType:'e', lastPay:'cash', lastType:'e' };
+const ui = { acctOpen:{}, sel:null, sCat:'all', acctOwner:'all', tab:'home', month:curMonth(), filter:'all', q:'', aType:'e', aBy:'cat', setType:'e', lastPay:'cash', lastType:'e' };
 
 const catById = id => S.cats.find(c => c.id === id) || {id, name:'未分類', color:'#8A8F98', type:'e'};
 const payById = id => S.pays.find(p => p.id === id) || {id, name:'その他', color:'#8A8F98'};
@@ -48,28 +48,6 @@ const realCount = () => Object.values(S.months).reduce((n,a) => n + a.length, 0)
 const monthTx = k => S.months[k] || [];
 const findTx = id => { for (const arr of Object.values(S.months)) { const x = arr.find(t => t.id === id); if (x) return x; } return null; };
 const sortTx = a => a.slice().sort((x,y) => x.d < y.d ? 1 : x.d > y.d ? -1 : (y.s||0) - (x.s||0));
-
-/* ===== 現資産（ポイント）: 支払方法に連動。残高＝基準残高＋基準日以降の収支（編集・削除・同期とずれない） ===== */
-const POINT_NAMES = [['楽天ポイント',0],['ANA',6],['JAL',0],['Vポイント',7],['dポイント',1]];
-function seedAssets() {
-  S.assets = [];
-  POINT_NAMES.forEach(([name, ci]) => {
-    let p = S.pays.find(p => p.name === name);
-    if (!p) { p = {id:'pt_' + uid(), name, color:PAL[ci]}; S.pays.push(p); }
-    S.assets.push({id:'a_' + uid(), name, color:PAL[ci], base:0, asOf:todayStr(), asOfTs:Date.now(), pay:p.id});
-  });
-}
-const assetBalance = (a, skipId) => {
-  let v = a.base;
-  if (a.pay) for (const x of allTx()) {
-    if (x.p !== a.pay || x.id === skipId) continue;
-    if (x.d > a.asOf || (x.d === a.asOf && (x.s || 0) > (a.asOfTs || 0))) v += x.t === 'i' ? x.a : -x.a;
-  }
-  return v;
-};
-seedAssets();
-const assetByPay = id => id ? S.assets.find(a => a.pay === id) : null;
-const cleanAsset = a => (a && typeof a.id === 'string' && typeof a.name === 'string') ? {id:a.id, name:a.name, color:a.color || '#8A8F98', base:Math.round(Number(a.base)) || 0, asOf:/^\d{4}-\d{2}-\d{2}$/.test(String(a.asOf)) ? a.asOf : todayStr(), asOfTs:Number(a.asOfTs) || 0, pay:String(a.pay || '')} : null;
 
 function totals(k, maxDay) {
   let i = 0, e = 0;
@@ -121,8 +99,63 @@ async function idbLoadAll() {
   });
   return {months, meta};
 }
-const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync, assets:S.assets});
-
+const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, trades:S.trades, idels:S.idels, prices:S.prices, recSkips:S.recSkips, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+/* エントリー: {id, run(実行日), due(期限), title(内容), memo(詳細), pt(付与pt), done(達成日。空なら未達成), u} */
+function cleanEntry(e) {
+  if (!e || typeof e !== 'object') return null;
+  const title = String(e.title || '').trim().slice(0, 40);
+  if (!title) return null;
+  const dt = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : '';
+  const pt = Math.round(Number(e.pt));
+  return {id: String(e.id || 'e' + uid()), run: dt(e.run), due: dt(e.due), title, memo: String(e.memo || '').slice(0, 200), pt: Number.isFinite(pt) && pt > 0 ? Math.min(pt, 999999999) : 0, done: dt(e.done), u: Number(e.u) || 0};
+}
+/* トレード: {id, k('stock'=株。なければビットコイン), name(株の銘柄), bd(購入日), sd(売買日), bp(買値・買い単価・円), bq(買い枚数), sp(売値・売り単価。未売却はnull), sq(売り枚数), done(決済済み), u}
+   ビットコインの買値・売値は1BTCあたりの円。旧形式（buy/sell＝合計金額）は、枚数1として読み替える */
+function cleanTrade(t) {
+  if (!t || typeof t !== 'object') return null;
+  const dt = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : '';
+  const has = v => v !== null && v !== undefined && v !== '';
+  const stock = t.k === 'stock';
+  const rp = v => stock ? Math.round(Number(v) * 100) / 100 : Math.round(Number(v));      // 単価：株は小数2桁まで
+  let bp = t.bp, bq = t.bq, sp = t.sp, sq = t.sq;
+  if (bp === undefined && t.buy !== undefined) { bp = t.buy; bq = 1; if (has(t.sell)) { sp = t.sell; sq = 1; } }
+  bp = rp(bp); bq = Math.round(Number(bq) * 1e8) / 1e8;
+  if (!Number.isFinite(bp) || bp < 0 || bp > 1e10 || !Number.isFinite(bq) || bq <= 0 || bq > 1e9) return null;
+  let spo = null, sqo = null;
+  if (has(sp)) {
+    const p = rp(sp); const q = has(sq) ? Math.round(Number(sq) * 1e8) / 1e8 : bq;
+    if (Number.isFinite(p) && p >= 0 && p <= 1e10 && Number.isFinite(q) && q > 0 && q <= 1e9) { spo = p; sqo = q; }
+  }
+  const name = String(t.name || '').trim().slice(0, 20);
+  if (stock && !name) return null;
+  const o = {id: String(t.id || 't' + uid()), bd: dt(t.bd), sd: dt(t.sd), bp, bq, sp: spo, sq: sqo, done: !!t.done, u: Number(t.u) || 0};
+  if (stock) { o.k = 'stock'; o.name = name; }
+  return o;
+}
+/* 現資産の項目: {id, kind(cash/stock/btc/eth), owner(h夫/w妻/j共有), name, bal(円)/qty(数量)/price(株価), note, color, u}。収支の記録とは別に持つ */
+function cleanAcct(a) {
+  if (!a || typeof a !== 'object') return null;
+  const kind = (a.kind === 'stock' || a.kind === 'point' || (a.kind && COINS[a.kind])) ? a.kind : 'cash';
+  const owner = Object.prototype.hasOwnProperty.call(OWNERS, a.owner) ? a.owner : '';
+  let name = String(a.name || '').trim().slice(0, 20);
+  if (!name) { if (COINS[kind]) name = COINS[kind].name; else return null; }
+  const out = {id: String(a.id || 'a' + uid()), kind, owner, name, bal: 0, qty: 0, price: 0, note: String(a.note || '').slice(0, 30), color: String(a.color || '#8A8F98'), u: Number(a.u) || 0, m: Number(a.m) || 0};
+  if (kind === 'cash' || kind === 'point') {
+    const bal = Math.round(Number(a.bal));
+    if (!Number.isFinite(bal) || bal < 0 || bal > 999999999999) return null;
+    out.bal = bal;
+  } else {
+    const qty = Number(a.qty);
+    if (!Number.isFinite(qty) || qty < 0 || qty > 1e12) return null;
+    out.qty = Math.round(qty * 1e8) / 1e8;
+    if (kind === 'stock') {
+      const price = Number(a.price);
+      if (!Number.isFinite(price) || price < 0 || price > 1e10) return null;
+      out.price = price;
+    }
+  }
+  return out;
+}
 function cleanTx(x) {
   if (!x || typeof x !== 'object') return null;
   const a = Number(x.a);
@@ -130,6 +163,8 @@ function cleanTx(x) {
   const out = {id: String(x.id || uid()), d: String(x.d), t: x.t === 'i' ? 'i' : 'e', c: String(x.c || ''), a: Math.round(a), p: String(x.p || ''), n: String(x.n || '').slice(0, 120), s: Number(x.s) || 0, u: Number(x.u) || 0};
   if (x.mf) out.mf = String(x.mf);
   if (x.r) out.r = String(x.r);
+  if (x.rid) { out.rid = String(x.rid); out.rd = Math.min(31, Math.max(1, Number(x.rd) || Number(out.d.slice(8)))); }   // 毎月の支払いの系列（rid）と支払日（rd）
+  if (x.rid && x.rec) out.rec = 1;                                                                                    // 「毎月」のチェック
   return out;
 }
 function applyLoaded(months, meta) {
@@ -147,7 +182,17 @@ function applyLoaded(months, meta) {
     if (meta.learn && typeof meta.learn === 'object' && !Array.isArray(meta.learn)) S.learn = meta.learn;
     S.lastBackup = Number(meta.lastBackup) || null;
     if (meta.dels && typeof meta.dels === 'object' && !Array.isArray(meta.dels)) { S.dels = {}; for (const k of Object.keys(meta.dels)) if (Number(meta.dels[k])) S.dels[k] = Number(meta.dels[k]); }
-    if (Array.isArray(meta.assets)) S.assets = meta.assets.map(cleanAsset).filter(Boolean); else seedAssets();
+    if (Array.isArray(meta.accts)) S.accts = meta.accts.map(cleanAcct).filter(Boolean);
+    if (meta.recSkips && typeof meta.recSkips === 'object' && !Array.isArray(meta.recSkips)) { S.recSkips = {}; for (const k of Object.keys(meta.recSkips).slice(-3000)) S.recSkips[k] = 1; }
+    if (meta.idels && typeof meta.idels === 'object' && !Array.isArray(meta.idels)) { S.idels = {}; for (const k of Object.keys(meta.idels).slice(0, 2000)) { const v = meta.idels[k]; if (v && ITEM_KINDS[v.k] && Number(v.t)) S.idels[k] = {k: v.k, t: Number(v.t)}; } }
+    if (Array.isArray(meta.trades)) S.trades = meta.trades.map(cleanTrade).filter(Boolean).slice(0, 5000);
+    if (Array.isArray(meta.entries)) S.entries = meta.entries.map(cleanEntry).filter(Boolean).slice(0, 2000);
+    if (Array.isArray(meta.pointNames)) S.pointNames = meta.pointNames.map(x => String(x).trim().slice(0, 20)).filter(Boolean).slice(0, 40);
+    if (Array.isArray(meta.acctNames)) S.acctNames = meta.acctNames.map(x => String(x).trim().slice(0, 20)).filter(Boolean).slice(0, 40);
+    if (meta.prices && typeof meta.prices === 'object') {
+      S.prices = {};
+      for (const k of Object.keys(COINS)) { const q = meta.prices[k]; if (q && Number(q.p) > 0) S.prices[k] = {p: Number(q.p), t: Number(q.t) || 0, manual: !!q.manual}; }
+    }
     if (meta.sync && typeof meta.sync === 'object') S.sync = {url:String(meta.sync.url || ''), key:String(meta.sync.key || ''), auto:meta.sync.auto !== false, last:Number(meta.sync.last) || null};
   }
 }
@@ -243,6 +288,7 @@ function deleteTx(orig) {
   S.months[ok] = (S.months[ok] || []).filter(x => x.id !== orig.id);
   saveMonth(ok);
   S.dels[orig.id] = Date.now();
+  if (orig.rid) S.recSkips[orig.id] = 1;     // 毎月の支払いを削除した月は、自動で作り直さない
   saveMeta();
   scheduleSync();
 }
@@ -268,6 +314,7 @@ function undoBatch(b) {
   if (!b) return;
   const tnow = Date.now();
   for (const id of b.ids) S.dels[id] = tnow;
+  if (b.rec) for (const id of b.ids) S.recSkips[id] = 1;     // 「毎月」の自動記録を取り消したときも、同じ月は作り直さない
   saveMeta();
   scheduleSync();
   for (const k of b.months) {
@@ -283,6 +330,49 @@ function undoBatch(b) {
   render();
   toast('取り消しました');
 }
+/* ===== 毎月の支払い =====
+   「毎月」にチェックした支出は、同じ系列（rid）の最新の記録をもとに、毎月の支払日（rd）に同じ内容を自動で記録する（支払日が来た月まで）。
+   支払いが終わったら、最新の月の記録で「毎月」のチェックを外すと、それ以降は記録されない。 */
+function latestOfSeries(rid) {
+  let last = null;
+  for (const x of allTx()) if (x.rid === rid && (!last || x.d > last.d || (x.d === last.d && (x.u || 0) > (last.u || 0)))) last = x;
+  return last;
+}
+function materializeRecurring(quiet) {
+  if (!store.loaded) return {n: 0};
+  const today = todayStr(), cm = curMonth();
+  const latest = new Map();
+  for (const x of allTx()) {
+    if (!x.rid) continue;
+    const cur = latest.get(x.rid);
+    if (!cur || x.d > cur.d || (x.d === cur.d && (x.u || 0) > (cur.u || 0))) latest.set(x.rid, x);
+  }
+  const txs = [];
+  for (const [rid, last] of latest) {
+    if (!last.rec || last.t !== 'e') continue;                 // 最新の記録のチェックが外れていれば停止中
+    const rd = last.rd || Number(last.d.slice(8));
+    let m = last.d.slice(0, 7);
+    for (let i = 0; i < 120; i++) {
+      m = shiftMonth(m, 1);
+      if (m > cm) break;
+      const [y, mo] = m.split('-').map(Number);
+      const d = `${m}-${pad(Math.min(rd, new Date(y, mo, 0).getDate()))}`;   // 31日払いは、30日までの月は月末にする
+      if (d > today) break;
+      const id = `r${rid}_${m.replace('-', '')}`;
+      if (S.recSkips[id] || S.dels[id] || findTx(id)) continue;
+      txs.push({id, d, t: 'e', c: last.c, a: last.a, p: last.p, n: last.n, s: Date.now() + txs.length, rid, rd, rec: 1});
+    }
+  }
+  if (!txs.length) return {n: 0};
+  const batch = addBatch(txs);
+  batch.rec = true;
+  if (!quiet) {
+    toast(`毎月の支払い${txs.length}件を記録しました`, {action: '取り消す', fn: () => undoBatch(batch), ms: 9000});
+    render();
+  }
+  return {n: txs.length, batch};
+}
+
 /* ===== CSV 読み込み（MoneyForward ME / このアプリのCSV） ===== */
 function decodeText(buf) {
   const u8 = new Uint8Array(buf);
@@ -364,6 +454,8 @@ function fixNumToken(tok) {
 function normLine(raw) {
   let s = String(raw).normalize('NFKC');
   s = s.replace(/[−‐-―]/g, '-').replace(/[▲△]\s*(?=[¥\\]?\d)/g, '-');
+  // 「¥」が「$」「·」「*」に化けた「金額だけの行」を直す（例: 「·279」「$498」「·62)」）。「#」は桁区切り付きのときだけ（レジ番号と区別するため）
+  s = s.replace(/^[·•・$*]\s?((?:\d{1,3}(?:,\s?\d{3})+|[1-9]\d*))\)?$/, '¥$1').replace(/^#\s?(\d{1,3}(?:,\s?\d{3})+)\)?$/, '¥$1');
   s = s.replace(/\\/g, '¥');
   s = s.replace(/([^A-Za-z\d]|^)[Yy]{1,2}(?=\s?¥?\d)/g, '$1¥').replace(/¥{2,}/g, '¥');
   for (let i = 0; i < 3; i++) s = s.replace(/(\d)\s?[.,。、]\s?(\d{3})(?!\d)/g, '$1$2');
@@ -388,7 +480,7 @@ const HEADER_RE = /(No\.?\s*\d|[ス責]\s*No|会計機|スキャン|領収証|�
 const END_RE = /^(小計|合計|総合計|お?買上|お会計|ご?請求|お預|お釣|おつり|釣銭|釣り|税込|対象|外税|内税|内消費税|消費税|クレジット|現金|カード|電子マネー|支払|ポイント|点数|\(?\d+%対象)/;
 const QTY_RE = /^\s*(\d+\s*(コ|個|点|本|袋|枚|パック)?\s*([xX×@]|\*\s*[\d単])|[@*]\s*\d|単\s*\d)/;   // 「0050* 品名」のような商品コードは数量行ではない
 const DISC_RE = /(値引|割引|クーポン|値下|ポイント利用|ポイント値引|割\s*$|引\s*$)/;
-const TOTAL_RE = /(合計|お?買上|お会計|総合計|ご?請求|TOTAL|お支払い?金額)/i;
+const TOTAL_RE = /(合計|今計|合書|合話|お?買上|お会計|総合計|ご?請求|TOTAL|お支払い?金額)/i;
 const NOT_TOTAL_RE = /(小計|対象|消費税|内税|外税|点数|ポイント|預|釣)/;
 const hasLetter = s => /[A-Za-z぀-ヿ㐀-鿿]/.test(s);
 
@@ -414,9 +506,14 @@ function matchItem(l) {
   const neg = la.neg || DISC_RE.test(label);
   return {label, amount: la.amount, neg};
 }
+/* 「広島商工センター店082-270-3368」「フレスポ西風新都店 2131」→ 電話番号・末尾の店番号を除く */
+function cleanStoreText(l) {
+  return String(l).replace(/(TEL|Tel|電話)?[\s.:：]*\d{2,4}-\d{2,4}-\d{3,4}.*$/, '').replace(/\s+[#＃]?\d{1,6}$/, '').trim();
+}
 function isStoreLine(l) {
   if (HEADER_RE.test(l) || findDate(l, new Date())) return false;
   if (/^[\d\s\-¥,.:]+$/.test(l)) return false;
+  if (/JAN|\d{8,}/.test(l)) return false;                                  // 「4984969010552JAN」のような商品コード行
   if (/[都道府県市区町村郡].*\d/.test(l) || /^〒/.test(l)) return false;
   const letters = (l.match(/[A-Za-z぀-ヿ㐀-鿿]/g) || []).length;
   return letters >= 2 && l.length <= 30;
@@ -446,7 +543,13 @@ function detectPay(text) {
 function parseReceipt(text, now) {
   now = now || new Date();
   const lines = [];
-  const rawLines = String(text).split(/\r?\n/).map(normLine).filter(Boolean);
+  const joined = [];
+  for (const l of String(text).split(/\r?\n/).map(x => x.trim()).filter(Boolean)) {
+    const prev = joined[joined.length - 1];
+    if (prev !== undefined && /\d[,，]\s?$/.test(prev) && /^\d{3}(?!\d)/.test(l)) joined[joined.length - 1] = prev + l;
+    else joined.push(l);
+  }
+  const rawLines = joined.map(normLine).filter(Boolean);
   const isPriceOnly = l => { const m = l.match(/^¥?\s?-?\s?¥?(\d{1,7})$/); return !!m && (l.includes('¥') || (m[1].length >= 3 && m[1][0] !== '0')); };   // 「00978」のような番号は金額ではない
   const kind = rawLines.map(l => isPriceOnly(l) ? 'P' : (hasLetter(l) && !lastAmount(l) && l.length <= 40 ? 'L' : 'O'));
   for (let i = 0; i < rawLines.length; i++) {                      // 「品名」の次の行が金額だけのとき（文字認識が列を分けて出す場合）は1行にする
@@ -468,9 +571,20 @@ function parseReceipt(text, now) {
   if (si >= 0) lines[si] = lines[si].replace(/^店名\s*[:：]\s*/, '');
   for (let i = 1; i < Math.min(lines.length, 16) && si < 0; i++) {                // 電話番号の行の直前が店名のことが多い
     if (/(TEL|Tel|電話|\d{2,4}-\d{2,4}-\d{3,4})/.test(lines[i])) {
+      const pre = lines[i].replace(/(TEL|Tel|電話)?[\s.:：]*\d{2,4}-\d{2,4}-\d{3,4}.*$/, '').trim();   // 「広島商工センター店082-270-3368」→「広島商工センター店」
+      if (pre && pre !== lines[i] && cjkN(pre) >= 3 && isStoreLine(pre)) { lines[i] = pre; si = i; break; }
+      for (let j = i - 1; j >= Math.max(0, i - 5) && si < 0; j--) {   // 住所行をはさんでいても「〜店」を優先
+        const c = cleanStoreText(lines[j]);
+        if (/店$/.test(c) && isStoreLine(c) && cjkN(c) >= 3) { lines[j] = c; si = j; }
+      }
+      if (si >= 0) break;
       for (let j = i - 1; j >= Math.max(0, i - 2); j--) if (isStoreLine(lines[j]) && cjkN(lines[j]) >= 3) { si = j; break; }
       break;
     }
+  }
+  if (si < 0) for (let i = 0; i < Math.min(lines.length, 14); i++) {
+    const c = cleanStoreText(lines[i]);
+    if (/店$/.test(c) && isStoreLine(c) && cjkN(c) >= 3) { lines[i] = c; si = i; break; }
   }
   if (si < 0) for (let i = 0; i < Math.min(lines.length, 10); i++) {
     if (/(店|院|クリニック|薬局|カフェ|マート|ストア|食堂|ホテル|ドラッグ)/.test(lines[i]) && isStoreLine(lines[i])) { si = i; break; }
@@ -486,7 +600,7 @@ function parseReceipt(text, now) {
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     if (info.total === null && TOTAL_RE.test(l) && !NOT_TOTAL_RE.test(l)) {
-      const la = lastAmount(l);
+      const la = lastAmount(l.replace(/\s*(\(?\d+点\)?|税込?|円|\))+\s*$/, ''));   // 「合計 ¥837 税」「合計 ¥420 (2点)」
       if (la && la.amount > 0) { info.total = la.amount; ended = true; }   // 合計より下は品目ではない
     }
     if (ended || used.has(i) || i < from) continue;
@@ -506,7 +620,18 @@ function parseReceipt(text, now) {
       if (pm && isPriceOnly(l)) prices.push({amount:Number(pm[2]), neg:pm[1] === '-'});
       else if (hasLetter(l) && !lastAmount(l) && l.length <= 30 && (l.match(/[A-Za-z぀-ヿ㐀-鿿]/g) || []).length >= 2) names.push(l);
     }
-    if (prices.length >= 2 && names.length >= 2 && Math.abs(names.length - prices.length) <= 1) {
+    if (prices.length >= 3) {                                   // 最後の金額が、その前の金額の合計と同じなら小計の重複表示なので除く
+      const last = prices[prices.length - 1];
+      const rest = prices.slice(0, -1).reduce((a, p) => a + (p.neg ? -p.amount : p.amount), 0);
+      if (!last.neg && last.amount === rest) prices.pop();
+    }
+    if (names.length > prices.length) {                         // 「◆」などで始まらない行は前の品名の折り返しとみなして結合
+      const merged = [];
+      for (const l of names) { if (merged.length && !/^[*＊・●○◆◇▪※★☆]/.test(l)) merged[merged.length - 1] += l; else merged.push(l); }
+      if (merged.length === prices.length) { names.length = 0; names.push(...merged); }
+    }
+    // 品名と金額の数が合わないときは、ずれた組み合わせを作らない（3件以下のときだけ従来どおり1件の差を許す）
+    if (prices.length >= 2 && names.length >= 2 && (names.length === prices.length || (prices.length <= 3 && Math.abs(names.length - prices.length) <= 1))) {
       const n = Math.min(names.length, prices.length), items = [];
       for (let i = 0; i < n; i++) items.push({label:names[i], amount:prices[i].amount, neg:prices[i].neg || DISC_RE.test(names[i])});
       if (items.length > info.items.length) info.items = items;
@@ -519,6 +644,21 @@ function parseReceipt(text, now) {
         if (la && la.amount >= 10) { info.total = la.amount; break; }
       }
     }
+  }
+  if (info.total === null && info.items.length) {               // 合計行の金額が離れて読まれた場合: 品目の合計と同じ金額がほかにあれば、それを合計とする
+    const sum = info.items.reduce((a, it) => a + (it.neg ? -it.amount : it.amount), 0);
+    const yens = new Set();
+    for (const l of lines) for (const m of l.matchAll(/¥\s?(\d{1,7})/g)) yens.add(Number(m[1]));
+    if (sum > 0 && yens.has(sum)) info.total = sum;
+  }
+  if (info.total === null) {                                    // それでも無いとき: 何度も出てくる金額を合計と推定（確認画面に「推定」と表示）
+    const cnt = new Map();
+    for (const l of lines) {
+      if (/(ポイント|番号|\*{3}|消費税|内税|外税|対象|税率|お釣|釣|預|%|TEL|Tel)/.test(l)) continue;
+      for (const m of l.matchAll(/¥\s?(\d{1,7})(?!\d)/g)) { const v = Number(m[1]); if (v >= 10) cnt.set(v, (cnt.get(v) || 0) + 1); }
+    }
+    const best = [...cnt].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0];
+    if (best && best[1] >= 2) { info.total = best[0]; info.totalGuess = true; }
   }
   return info;
 }
@@ -628,22 +768,45 @@ function isIos() { return /iPhone|iPad|iPod/.test(navigator.userAgent) || (navig
 const DAY = 86400000;
 
 function render() {
-  renderBar();
-  for (const id of ['home','stats','assets','set']) $('#v-' + id).hidden = ui.tab !== id;
+  if (ui.tab !== 'home') ui.sel = null;
+  renderBar(); updateEntryBadge();
+  for (const id of ['home','stats','acct','entry','trade','set']) $('#v-' + id).hidden = ui.tab !== id;
   document.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-current', b.dataset.tab === ui.tab ? 'page' : 'false'));
-  $('#fabwrap').hidden = ui.tab === 'set' || ui.tab === 'assets';
+  $('#fabwrap').hidden = ui.tab === 'set' || ui.tab === 'acct' || ui.tab === 'entry' || ui.tab === 'trade' || !!ui.sel;
   if (ui.tab === 'home') { renderBanner(); renderSummary(); renderFilter(); renderList(); }
   else if (ui.tab === 'stats') renderStats();
-  else if (ui.tab === 'assets') renderAssets();
+  else if (ui.tab === 'acct') { renderAcct(); refreshPrices(false); }
+  else if (ui.tab === 'entry') renderEntries();
+  else if (ui.tab === 'trade') { renderTrades(); refreshPrices(false, TRADE_TTL); }
   else renderSettings();
+  renderSelBar();
 }
 
 function renderBar() {
   const [y,m] = ui.month.split('-').map(Number);
-  const isSet = ui.tab === 'set' || ui.tab === 'assets';
-  $('#mLabel').textContent = ui.tab === 'assets' ? '現資産' : isSet ? '設定' : `${y}年${m}月`;
+  const isSet = ui.tab === 'set' || ui.tab === 'acct' || ui.tab === 'entry' || ui.tab === 'trade';   // 月の切り替えが要らない画面
+  $('#mLabel').textContent = ui.tab === 'set' ? '設定' : ui.tab === 'acct' ? '現資産' : ui.tab === 'entry' ? 'エントリー' : ui.tab === 'trade' ? 'トレード' : `${y}年${m}月`;
   $('#navPrev').style.visibility = $('#navNext').style.visibility = isSet ? 'hidden' : 'visible';
+  const nx = $('#navNext');
+  const mode = ui.tab === 'entry' ? 'addentry' : ui.tab === 'acct' ? 'addacct' : ui.tab === 'trade' ? 'addtrade' : 'next';
+  if (nx.dataset.mode !== mode) {
+    if (!nx.dataset.orig) nx.dataset.orig = nx.innerHTML;
+    nx.dataset.mode = mode;
+    nx.innerHTML = mode === 'next' ? nx.dataset.orig : '<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+    nx.dataset.act = mode;
+    nx.setAttribute('aria-label', mode === 'addentry' ? 'エントリーを追加' : mode === 'addacct' ? '資産を追加' : mode === 'addtrade' ? 'トレードを追加' : '次の月');
+  }
+  if (mode !== 'next') nx.style.visibility = 'visible';
+  const pv = $('#navPrev'), back = ui.tab === 'set';
+  if ((pv.dataset.mode === 'back') !== back) {
+    pv.dataset.mode = back ? 'back' : '';
+    pv.dataset.act = back ? 'tab' : 'prev';
+    if (back) pv.dataset.tab = 'home'; else delete pv.dataset.tab;
+    pv.setAttribute('aria-label', back ? '家計簿に戻る' : '前の月');
+  }
+  if (back) pv.style.visibility = 'visible';
   $('#todayBtn').hidden = isSet || ui.month === curMonth();
+  $('#gearBtn').hidden = ui.tab !== 'home';
 }
 
 function renderBanner() {
@@ -695,8 +858,73 @@ function renderFilter() {
   $('#toolbar').hidden = store.loaded && realCount() === 0;
 }
 
+/* ===== 選択して削除 ===== */
+function renderSelBar() {
+  const bar = $('#selbar');
+  const on = !!ui.sel && ui.tab === 'home';
+  bar.hidden = !on;
+  $('#selBtn').setAttribute('aria-pressed', String(on));
+  if (!on) { bar.innerHTML = ''; return; }
+  const n = ui.sel.size, all = (ui.shownIds || []).length;
+  bar.innerHTML = `<div class="selin">
+    <button type="button" class="btn small" data-act="selall">${n && n === all ? '選択を解除' : '全て選択'}</button>
+    <span class="selcnt"><b>${n}</b>件 選択中</span>
+    <button type="button" class="btn danger small" data-act="seldel"${n ? '' : ' disabled'}>削除</button>
+    <button type="button" class="btn small" data-act="selmode">やめる</button>
+  </div>`;
+}
+function deleteMany(txs) {
+  const months = new Set(), t = Date.now();
+  for (const tx of txs) {
+    const k = tx.d.slice(0, 7);
+    S.months[k] = (S.months[k] || []).filter(x => x.id !== tx.id);
+    if (!S.months[k].length) delete S.months[k];
+    S.dels[tx.id] = t;
+    if (tx.rid) S.recSkips[tx.id] = 1;     // 毎月の支払いを削除した月は、自動で作り直さない
+    months.add(k);
+  }
+  months.forEach(k => saveMonth(k));
+  saveMeta();
+  scheduleSync();
+}
+function restoreMany(txs) {
+  const months = new Set(), t = Date.now();
+  for (const tx of txs) {
+    delete S.dels[tx.id]; delete S.recSkips[tx.id];
+    tx.u = t;
+    const k = tx.d.slice(0, 7);
+    (S.months[k] = S.months[k] || []).push(tx);
+    months.add(k);
+  }
+  months.forEach(k => saveMonth(k));
+  saveMeta();
+  scheduleSync();
+}
+function openSelDelete() {
+  const txs = [...ui.sel].map(findTx).filter(Boolean);
+  if (!txs.length) return;
+  const ex = txs.filter(x => x.t === 'e').reduce((s, x) => s + x.a, 0), inc = txs.filter(x => x.t === 'i').reduce((s, x) => s + x.a, 0);
+  const ds = txs.map(x => x.d).sort();
+  const hasRec = txs.some(x => x.rid);
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>選んだ記録を削除</h2>${closeBtn('dClose')}</div>
+    <div class="card"><dl class="kv"><dt>件数</dt><dd>${txs.length.toLocaleString('ja-JP')}件</dd><dt>期間</dt><dd>${esc(fmtYMD(ds[0]))}${ds[0] === ds[ds.length - 1] ? '' : ' 〜 ' + esc(fmtYMD(ds[ds.length - 1]))}</dd>${ex ? `<dt>支出の合計</dt><dd>${yen(ex)}</dd>` : ''}${inc ? `<dt>収入の合計</dt><dd>${yen(inc)}</dd>` : ''}</dl></div>
+    <p class="err" style="min-height:0;margin-top:14px"><b>${txs.length.toLocaleString('ja-JP')}件の記録を削除します。</b>スプレッドシートと同期している場合は、他の端末からも消えます。</p>
+    ${hasRec ? '<p class="note" style="margin-left:0">「毎月」の記録を含みます。削除した月は、自動では作り直されません。</p>' : ''}
+    <div class="sheet-foot"><div class="actions"><button type="button" class="btn" id="dNo">やめる</button><button type="button" class="btn danger solid primary" id="dYes">削除する</button></div></div>`, '選んだ記録を削除');
+  sheet.querySelector('#dClose').onclick = sheet.querySelector('#dNo').onclick = closeSheet;
+  sheet.querySelector('#dYes').onclick = () => {
+    deleteMany(txs);
+    ui.sel = null;
+    closeSheet(); render();
+    toast(`${txs.length.toLocaleString('ja-JP')}件を削除しました`, {action:'元に戻す', ms:8000, fn: () => { restoreMany(txs); render(); toast('元に戻しました'); }});
+  };
+}
+
 function renderList() {
   const box = $('#list');
+  const prevSel = ui.sel;
+  ui.shownIds = []; if (ui.sel) ui.sel = new Set();     // 表示されていない記録は選択に残さない（下で、表示中の分だけ戻す）
   if (!store.loaded) { box.innerHTML = ''; return; }
   if (realCount() === 0) {
     box.innerHTML = `
@@ -723,6 +951,8 @@ function renderList() {
     return;
   }
   const shown = list.slice(0, 400);
+  ui.shownIds = shown.map(x => x.id);
+  if (prevSel) { const ids = new Set(ui.shownIds); ui.sel = new Set([...prevSel].filter(id => ids.has(id))); }
   const groups = [];
   for (const x of shown) {
     const g = groups[groups.length - 1];
@@ -739,9 +969,10 @@ function renderList() {
       const c = catById(x.c);
       const sub = [x.n, payName(x.p)].filter(Boolean).join(' · ');
       const cf = cashflow(x);
-      return `<button type="button" class="row" data-act="edit" data-id="${esc(x.id)}">
-        <i class="dot" style="background:${c.color}"></i>
-        <span class="main"><span class="cat">${esc(c.name)}</span><span class="sub">${esc(sub)}</span></span>
+      const on = ui.sel && ui.sel.has(x.id);
+      return `<button type="button" class="row${ui.sel ? ' selrow' : ''}" data-act="${ui.sel ? 'selrow' : 'edit'}" data-id="${esc(x.id)}"${ui.sel ? ` aria-pressed="${!!on}"` : ''}>
+        ${ui.sel ? `<span class="selbox" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>` : `<i class="dot" style="background:${c.color}"></i>`}
+        <span class="main"><span class="cat">${esc(c.name)}</span><span class="sub">${x.rec ? '<span class="otag">毎月</span>' : ''}${esc(sub)}</span></span>
         <span class="amt${cf > 0 ? ' inc' : ''}">${cf > 0 ? '+' : '−'}${yen(x.a)}</span>
       </button>`;
     }).join('');
@@ -760,6 +991,59 @@ function breakdown(key, type, by) {
     const o = by === 'cat' ? catById(id) : payById(id);
     return {name:o.name, color:o.color, v};
   }).sort((a,b) => b.v - a.v);
+}
+
+/* ===== 分析：期間・カテゴリで集計 ===== */
+const monthEnd = ym => { const [y, m] = ym.split('-').map(Number); return `${ym}-${pad(new Date(y, m, 0).getDate())}`; };
+function searchRange(v) {
+  const cm = curMonth(), y = cm.slice(0, 4);
+  if (v === 'this') return [cm + '-01', monthEnd(cm)];
+  if (v === 'last') { const p = shiftMonth(cm, -1); return [p + '-01', monthEnd(p)]; }
+  if (v === '3m') return [shiftMonth(cm, -2) + '-01', monthEnd(cm)];
+  if (v === 'year') return [y + '-01-01', y + '-12-31'];
+  return ['', ''];
+}
+function searchCardHtml() {
+  if (ui.sFrom === undefined) { ui.sFrom = ui.month + '-01'; ui.sTo = monthEnd(ui.month); }
+  const word = ui.aType === 'e' ? '支出' : '収入';
+  const cats = S.cats.filter(c => c.type === ui.aType);
+  if (ui.sCat !== 'all' && !cats.some(c => c.id === ui.sCat)) ui.sCat = 'all';
+  const from = ui.sFrom || '', to = ui.sTo || '';
+  const bad = from && to && from > to;
+  const list = bad ? [] : allTx().filter(x => x.t === ui.aType && (!from || x.d >= from) && (!to || x.d <= to) && (ui.sCat === 'all' || x.c === ui.sCat))
+    .sort((a, b) => a.d < b.d ? 1 : a.d > b.d ? -1 : (b.s || 0) - (a.s || 0));
+  const total = list.reduce((s, x) => s + x.a, 0);
+  const label = (from || to) ? `${from ? fmtYMD(from) : '最初'} 〜 ${to ? fmtYMD(to) : '最後'}` : '全期間';
+  const chip = (v, n) => { const r = searchRange(v); return `<button type="button" class="chip small" data-act="srange" data-v="${v}" aria-pressed="${r[0] === from && r[1] === to}">${n}</button>`; };
+  let body = '';
+  if (bad) body = '<div class="empty">開始日が終了日より後になっています。</div>';
+  else if (!list.length) body = `<div class="empty">この条件の${word}はありません。</div>`;
+  else if (ui.sCat === 'all') {
+    const map = {};
+    for (const x of list) map[x.c] = (map[x.c] || 0) + x.a;
+    const rows = Object.entries(map).map(([id, v]) => ({...catById(id), v})).sort((a, b) => b.v - a.v);
+    const max = Math.max(1, rows[0].v);
+    body = rows.map(r => {
+      const pct = total > 0 ? r.v / total * 100 : 0;
+      return `<button type="button" class="rank sbtn" data-act="scat" data-v="${esc(r.id)}" aria-label="${esc(r.name)}だけに絞り込む"><div class="rtop"><span class="rname"><i class="dot" style="background:${r.color}"></i>${esc(r.name)}</span><span class="rval"><span class="amt">${r.v < 0 ? '−' : ''}${yen(r.v)}</span><span class="pct">${pct < 1 && pct > 0 ? '<1' : Math.round(Math.max(0, pct))}%</span></span></div><div class="rbar"><i style="width:${Math.max(0, r.v) / max * 100}%;background:${r.color}"></i></div></button>`;
+    }).join('');
+  } else {
+    const shown = list.slice(0, 100);
+    body = `<div class="rows" style="margin-top:6px">${shown.map(x => {
+      const c = catById(x.c), sub = [x.n, payName(x.p)].filter(Boolean).join(' · ');
+      return `<button type="button" class="row" data-act="edit" data-id="${esc(x.id)}"><i class="dot" style="background:${c.color}"></i><span class="main"><span class="cat">${esc(fmtYMD(x.d))}　${esc(c.name)}</span><span class="sub">${x.rec ? '<span class="otag">毎月</span>' : ''}${esc(sub)}</span></span><span class="amt">${yen(x.a)}</span></button>`;
+    }).join('')}</div>${list.length > shown.length ? `<div class="empty">ほか${list.length - shown.length}件。期間を狭めてください。</div>` : ''}`;
+  }
+  return `<div class="card" id="sCard">
+      <p class="sub-title">期間・カテゴリで集計</p>
+      <div class="chips" role="group" aria-label="期間の選び方">${chip('this', '今月')}${chip('last', '先月')}${chip('3m', '直近3か月')}${chip('year', '今年')}${chip('all', '全期間')}</div>
+      <div class="srow"><label><span class="flabel">開始日</span><input id="sFrom" type="date" value="${esc(from)}"></label><label><span class="flabel">終了日</span><input id="sTo" type="date" value="${esc(to)}"></label></div>
+      <label class="field" style="margin-top:12px"><span class="flabel">カテゴリ</span><select id="sCat"><option value="all">すべてのカテゴリ</option>${cats.map(c => `<option value="${esc(c.id)}"${ui.sCat === c.id ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+      <div class="lbl" style="margin-top:14px">${esc(label)}の${ui.sCat === 'all' ? '' : esc(catById(ui.sCat).name) + 'の'}${word}合計</div>
+      <div class="big${ui.aType === 'e' ? ' exp' : ' inc'}">${yen(total)}</div>
+      <p class="caption num" style="margin:2px 0 8px">${list.length.toLocaleString('ja-JP')}件</p>
+      ${body}
+    </div>`;
 }
 
 function renderStats() {
@@ -787,6 +1071,8 @@ function renderStats() {
   }).join('');
   const cur = tt[tt.length - 1];
   $('#stats').innerHTML = `
+    ${searchCardHtml()}
+    <div class="section-title">${m}月の内訳</div>
     <div class="card">
       <div class="lbl">${m}月の${word}合計</div>
       <div class="big${ui.aType === 'e' ? ' exp' : ' inc'}" style="margin-bottom:8px">${yen(total)}</div>
@@ -861,25 +1147,559 @@ function renderSettings() {
       <p class="note" style="margin:8px 0 0">記録は消えません。新しい版が反映されないときに押してください。</p>
     </div>`;
 }
-
-function renderAssets() {
-  const box = $('#assets');
-  const total = S.assets.reduce((n, a) => n + assetBalance(a), 0);
-  const rows = S.assets.map(a => {
-    const b = assetBalance(a), pn = a.pay ? payName(a.pay) : '未連携';
-    const [, m, d] = a.asOf.split('-').map(Number);
-    return `<button type="button" class="row" data-act="edit-asset" data-id="${esc(a.id)}">
-      <i class="dot" style="background:${a.color}"></i>
-      <span class="main"><span class="cat">${esc(a.name)}</span><span class="sub">${m}/${d}時点の残高から計算 · 支払方法：${esc(pn)}</span></span>
-      <span class="amt${b < 0 ? ' neg' : ''}">${b < 0 ? '−' : ''}${yen(b)}</span>
-    </button>`;
-  }).join('');
-  box.innerHTML = `<div class="asset-total"><span class="muted">ポイント合計</span><span class="big">${b0(total)}</span></div>
-    <div class="rows">${rows || '<div class="empty">資産がありません。</div>'}</div>
-    <div style="margin-top:14px"><button type="button" class="btn" data-act="add-asset" style="width:100%">＋ 資産を追加</button></div>
-    <p class="note" style="margin-left:2px">各行をタップして、現在の残高を入力してください。それ以降、支出の「支払方法」でその名前を選ぶと残高が減ります（収入や返金なら増えます）。</p>`;
+/* ===== 現資産（預貯金・株式・暗号資産。収入・支出とは別に、いまの資産を持つ） ===== */
+const ACCT_PRESETS = ['三井住友銀行','PayPay銀行','楽天銀行','ゆうちょ銀行','三菱UFJ銀行','みずほ銀行','現金（手元）'];
+const POINT_PRESETS = ['楽天ポイント','Vポイント','PayPayポイント','dポイント','WAONポイント'];   // 1ポイント＝1円として評価
+const OWNERS = {h:'夫', w:'妻', j:'共有', '':'未設定'};
+const KINDS = {cash:'預貯金', stock:'株', btc:'ビットコイン', eth:'イーサリアム', point:'ポイント'};
+const COINS = {btc:{name:'ビットコイン', sym:'BTC', bf:'BTC_JPY', cg:'bitcoin'}, eth:{name:'イーサリアム', sym:'ETH', bf:'ETH_JPY', cg:'ethereum'}};
+const KIND_GROUPS = [['cash','預貯金'], ['stock','株'], ['crypto','暗号資産'], ['point','ポイント']];
+const groupOf = k => COINS[k] ? 'crypto' : k;
+const PRICE_TTL = 5 * 60 * 1000;
+const TRADE_TTL = 30 * 1000;      // トレード画面では、約30秒ごとに価格を取り直す
+/* 1つの資産のいまの評価額（円）。預貯金は残高、株式は株数×株価、暗号資産は保有数量×取得済みの価格 */
+const acctValue = a => a.kind === 'stock' ? Math.round((a.qty || 0) * (a.price || 0))
+  : COINS[a.kind] ? (S.prices[a.kind] ? Math.round((a.qty || 0) * S.prices[a.kind].p) : 0) : a.bal;
+const fmtQty = (q, dec) => Number(q).toLocaleString('ja-JP', {maximumFractionDigits: dec});
+const fmtMD = u => { const d = new Date(u); return `${d.getMonth() + 1}/${d.getDate()}`; };
+const fmtMDHM = u => { const d = new Date(u); return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${pad(d.getMinutes())}`; };
+/* 数字入力の整形（全角→半角、小数点は1つ、小数の桁数を制限） */
+function numClean(v, dec) {
+  let s = normDigits(String(v)).replace(/[^\d.]/g, '');
+  const i = s.indexOf('.');
+  if (i >= 0) s = s.slice(0, i + 1) + s.slice(i + 1).replace(/\./g, '').slice(0, dec);
+  if (dec === 0) s = s.replace(/\./g, '');
+  return s.replace(/^0+(?=\d)/, '').slice(0, 14);
 }
-const b0 = n => (n < 0 ? '−' : '') + yen(n);
+
+/* --- 暗号資産の価格（円）。取得元は順に試す。取れなければ前回の価格、手入力も可 --- */
+let priceBusy = false, priceNote = '';
+const lastPriceTry = {};   // 通貨ごとの最後に取得を試した時刻（失敗が続いても1分に1回まで）
+async function fetchJson(url, ms = 8000) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    const res = await fetch(url, {signal: ctl.signal, cache: 'no-store'});
+    if (!res.ok) throw new Error('http ' + res.status);
+    return await res.json();
+  } finally { clearTimeout(timer); }
+}
+const PRICE_SOURCES = [
+  async c => Number((await fetchJson('https://api.bitflyer.com/v1/ticker?product_code=' + COINS[c].bf)).ltp),
+  async c => Number((await fetchJson('https://api.coingecko.com/api/v3/simple/price?ids=' + COINS[c].cg + '&vs_currencies=jpy'))[COINS[c].cg].jpy)
+];
+async function fetchPrice(c) {
+  for (const src of PRICE_SOURCES) {
+    try { const p = await src(c); if (Number.isFinite(p) && p > 0) return p; } catch (e) {}
+  }
+  return null;
+}
+async function refreshPrices(force, ttl = PRICE_TTL) {
+  const kinds = [...new Set([...S.accts.map(a => a.kind).filter(k => COINS[k]), ...(S.trades.some(t => !isStock(t)) || ui.tab === 'trade' ? ['btc'] : [])])];
+  if (!kinds.length || priceBusy) return;
+  const now = Date.now();
+  const need = kinds.filter(k => force || ((!S.prices[k] || S.prices[k].manual || now - S.prices[k].t > ttl) && now - (lastPriceTry[k] || 0) >= Math.min(60000, ttl)));
+  if (!need.length) return;
+  need.forEach(k => { lastPriceTry[k] = now; });
+  if (navigator.onLine === false) {
+    priceNote = 'オフラインのため価格を更新できません。前回の価格（または手入力した価格）で表示しています。';
+    if (ui.tab === 'acct') renderAcct();
+    if (ui.tab === 'trade') renderTrades();
+    return;
+  }
+  priceBusy = true; priceNote = '';
+  if (ui.tab === 'acct') renderAcct();
+  if (ui.tab === 'trade') renderTrades();
+  let ok = 0;
+  await Promise.all(need.map(async k => { const p = await fetchPrice(k); if (p) { S.prices[k] = {p, t: Date.now(), manual: false}; ok++; } }));
+  priceBusy = false;
+  priceNote = ok === need.length ? '' : '一部の価格を取得できませんでした。前回の価格（または手入力した価格）で表示しています。資産の編集画面で価格を手入力することもできます。';
+  if (ok) saveMeta();
+  if (ui.tab === 'acct') renderAcct();
+  if (ui.tab === 'trade') renderTrades();
+}
+
+function acctDetail(a) {
+  const parts = [];
+  if (a.kind === 'stock') parts.push(`${fmtQty(a.qty, 4)}株 × ${yen(a.price)}`);
+  else if (a.kind === 'point') parts.push(`${fmtQty(a.bal, 0)} pt`);
+  else if (COINS[a.kind]) {
+    const c = COINS[a.kind], p = S.prices[a.kind];
+    parts.push(`${fmtQty(a.qty, 8)} ${c.sym}` + (p ? ` × ${yen(p.p)}` : '（価格未取得）'));
+  }
+  if (a.note) parts.push(a.note);
+  if (a.u) parts.push(`${fmtMD(a.u)}更新`);
+  return parts.join(' · ');
+}
+
+function renderAcct() {
+  const box = $('#acct');
+  if (!store.loaded) { box.innerHTML = '<div class="card"><p class="muted" style="margin:0">読み込み中…</p></div>'; return; }
+  if (!S.accts.length) {
+    box.innerHTML = `
+      <div class="welcome card">
+        <h2>現資産を登録しましょう</h2>
+        <p>預貯金、株、暗号資産（ビットコイン・イーサリアム）、ポイントを、夫・妻の持ち主ごとに登録すると、どこにいくらあるかを一覧で見られます。収入・支出の記録とは別に保存されます。</p>
+        <div class="chips">${ACCT_PRESETS.slice(0, 5).map(n => `<button type="button" class="chip" data-act="acctpreset" data-name="${esc(n)}">${esc(n)}</button>`).join('')}</div>
+        <button type="button" class="btn primary" data-act="addacct">資産を追加する</button>
+      </div>`;
+    return;
+  }
+  if (ui.acctOwner !== 'all' && !S.accts.some(a => a.owner === ui.acctOwner)) ui.acctOwner = 'all';
+  const f = ui.acctOwner;
+  const base = S.accts.filter(a => f === 'all' || a.owner === f);
+  const total = base.reduce((sum, a) => sum + acctValue(a), 0);
+  const ownerKeys = ['h', 'w', 'j', ''].filter(k => k === 'h' || k === 'w' || S.accts.some(a => a.owner === k));
+  const sumBy = pred => S.accts.filter(pred).reduce((sum, a) => sum + acctValue(a), 0);
+  const segBtn = (v, label) => `<button type="button" data-act="acctowner" data-v="${v}" aria-pressed="${f === v}">${label}</button>`;
+  const seg = `<div class="seg" id="acctOwnerSeg" role="group" aria-label="持ち主で絞り込み" style="margin-bottom:12px">${segBtn('all', 'すべて')}${ownerKeys.map(k => segBtn(k, OWNERS[k])).join('')}</div>`;
+  const ownerSplit = f === 'all'
+    ? `<div class="split" style="grid-template-columns:repeat(${ownerKeys.length},minmax(0,1fr))">${ownerKeys.map(k => `<div><span class="lbl">${OWNERS[k]}</span><b>${yen(sumBy(a => a.owner === k))}</b></div>`).join('')}</div>`
+    : '';
+  const coinKinds = Object.keys(COINS).filter(k => S.accts.some(a => a.kind === k));
+  const latestPrice = Math.max(0, ...coinKinds.map(k => S.prices[k] ? S.prices[k].t : 0));
+  const priceBox = coinKinds.length ? `
+      <div class="meter-cap" style="margin-top:12px">${priceBusy ? '価格を取得中…' : coinKinds.map(k => `${COINS[k].sym} ${S.prices[k] ? yen(S.prices[k].p) + (S.prices[k].manual ? '（手入力）' : '') : '未取得'}`).join(' ／ ') + (latestPrice ? `（${fmtMDHM(latestPrice)}時点）` : '')}</div>
+      ${priceNote ? `<div class="meter-cap" style="color:var(--warn)">${esc(priceNote)}</div>` : ''}
+      <div style="margin-top:8px"><button type="button" class="chip small" data-act="acct-refresh"${priceBusy ? ' disabled' : ''}>価格を更新</button></div>` : '';
+  const groups = KIND_GROUPS.map(([gk, gn]) => {
+    const items = base.filter(a => groupOf(a.kind) === gk).sort((a, b) => acctValue(b) - acctValue(a) || a.name.localeCompare(b.name, 'ja'));
+    const sub = items.reduce((sum, a) => sum + acctValue(a), 0);
+    const gpct = total > 0 ? Math.round(sub / total * 100) : 0;
+    const open = ui.acctOpen[gk] !== false;
+    const rows = items.map(a => {
+      const v = acctValue(a), pct = total > 0 ? Math.round(v / total * 100) : 0;
+      return `<button type="button" class="row" data-act="editacct" data-id="${esc(a.id)}">
+      <i class="dot" style="background:${esc(a.color)}"></i>
+      <span class="main"><span class="cat">${esc(a.name)}</span><span class="sub" style="white-space:normal"><span class="otag">${OWNERS[a.owner]}</span>${esc(acctDetail(a))}</span></span>
+      <span class="amt">${yen(v)}<small style="display:block;text-align:right;color:var(--muted);font-size:12px">${pct}%</small></span>
+      <span class="rbar" style="grid-column:1 / -1;display:block;margin-top:0"><i style="width:${v > 0 ? Math.max(pct, 2) : 0}%;background:${esc(a.color)}"></i></span>
+    </button>`;
+    }).join('');
+    const bodyHtml = !open ? '' : items.length ? `<div class="rows">${rows}</div>` : `<div class="empty acg-empty">登録なし（右の「＋」で追加）</div>`;
+    return `<div class="acg">
+      <div class="acghead">
+        <button type="button" class="acgtoggle" data-act="acctgrp" data-v="${gk}" aria-expanded="${open}"><svg class="i chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg><span class="acgname">${gn}</span><span class="acgcnt">${items.length}件</span></button>
+        <span class="acgsum"><b class="num">${yen(sub)}</b><small>${gpct}%</small></span>
+        <button type="button" class="icon-btn sm" data-act="addacct" data-kind="${gk}" aria-label="${gn}を追加"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+      </div>
+      ${bodyHtml}
+    </div>`;
+  }).join('');
+  box.innerHTML = `
+    ${seg}
+    <div class="card">
+      <div class="lbl">${f === 'all' ? '現資産の合計' : OWNERS[f] + 'の現資産'}</div>
+      <div class="big">${yen(total)}</div>
+      ${ownerSplit}
+      ${priceBox}
+    </div>
+    ${groups}
+    <p class="note">資産の追加は、右上の「＋」から行います。残高や数量が変わったら、その資産をタップして更新してください。株式の株価は手入力です。ビットコイン・イーサリアムの価格は自動で取得します（円換算）。ポイントは1ポイント＝1円として合計に含めます。ここの金額は収入・支出の記録には影響しません。</p>`;
+}
+
+function openAcctSheet(item, preset, initKind) {
+  const isNew = !item;
+  const nameList = () => [...new Set([...ACCT_PRESETS, ...S.acctNames])];
+  const d = item ? {...item} : {id:'a' + uid()};
+  const st = item
+    ? {kind:item.kind, owner:item.owner, nameSel:'', name:item.name, bal:(item.kind === 'cash' || item.kind === 'point') ? String(item.bal) : '', qty:item.qty ? String(item.qty) : '',
+       price:item.kind === 'stock' ? (item.price ? String(item.price) : '') : (COINS[item.kind] && S.prices[item.kind] ? String(S.prices[item.kind].p) : ''), note:item.note, color:item.color}
+    : (() => { const k0 = initKind === 'crypto' ? 'btc' : (KINDS[initKind] ? initKind : 'cash'); return {kind:k0, owner:(ui.acctOwner === 'h' || ui.acctOwner === 'w' || ui.acctOwner === 'j') ? ui.acctOwner : '', nameSel:'', name:preset || '', bal:'', qty:'', price:COINS[k0] && S.prices[k0] ? String(S.prices[k0].p) : '', note:'', color:PAL[S.accts.length % PAL.length]}; })();
+  const isNamed = k => k === 'cash' || k === 'point';       // 一覧から名前を選ぶ種類（口座名・ポイント名）
+  const namesFor = k => k === 'point' ? [...new Set([...POINT_PRESETS, ...S.pointNames])] : nameList();
+  if (isNamed(st.kind) && st.name) st.nameSel = namesFor(st.kind).includes(st.name) ? st.name : '+';
+  let confirming = false;
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>資産を${isNew ? '追加' : '編集'}</h2>${closeBtn('aClose')}</div>
+    <div id="aTop"></div>
+    <div id="aDyn"></div>
+    <label class="field"><span class="flabel">メモ（任意）</span><input id="aNote" type="text" maxlength="30" autocomplete="off" placeholder="例：普通預金、NISA、取引所名"></label>
+    <div class="field"><span class="flabel">色</span><div class="swatches" id="aSw"></div></div>
+    ${!isNew && d.u ? `<p class="note" style="margin-left:0">最終更新：${esc(new Date(d.u).toLocaleDateString('ja-JP'))}</p>` : ''}
+    <div class="sheet-foot"><p class="err" id="aErr" role="alert" style="min-height:0;margin:0 0 6px"></p><div id="aActions"></div></div>`, `資産を${isNew ? '追加' : '編集'}`);
+  const $a = id => sheet.querySelector(id);
+  const setErr = m => { $a('#aErr').textContent = m || ''; };
+  $a('#aNote').value = st.note;
+
+  const paintTop = () => {
+    const chip = (attr, v, label, on) => `<button type="button" class="chip small" ${attr}="${v}" aria-pressed="${on}">${label}</button>`;
+    $a('#aTop').innerHTML = `
+      <div class="field" style="margin-top:0"><span class="flabel">種類</span>${isNew
+        ? `<div class="chips" id="aKinds">${Object.entries(KINDS).map(([k, n]) => chip('data-k', k, n, st.kind === k)).join('')}</div>`
+        : `<div style="font-weight:600">${KINDS[st.kind]}</div>`}</div>
+      <div class="field"><span class="flabel">持ち主（夫・妻）</span><div class="chips" id="aOwners">${['h', 'w', 'j'].map(o => chip('data-o', o, OWNERS[o], st.owner === o)).join('')}</div></div>`;
+  };
+  const valueNow = () => {
+    if (isNamed(st.kind)) return st.bal ? Number(st.bal) : null;
+    const q = parseFloat(st.qty), p = parseFloat(st.price);
+    return Number.isFinite(q) && Number.isFinite(p) ? Math.round(q * p) : null;
+  };
+  const paintPrev = () => {
+    const el = $a('#aPrev'); if (!el) return;
+    const v = valueNow();
+    el.textContent = v === null ? '' : (st.kind === 'point' ? `＝ ${v.toLocaleString('ja-JP')} pt（1pt＝1円で評価）` : '＝ ' + yen(v));
+  };
+  const paintDyn = () => {
+    const k = st.kind, c = COINS[k];
+    let h = '';
+    if (isNamed(k)) {
+      const pt = k === 'point';
+      h = `<div class="field"><span class="flabel">${pt ? 'ポイント名' : '口座名'}（一覧にないときは「＋ その他」で自由入力）</span><div class="chips" id="aNames">${namesFor(k).map(n => `<button type="button" class="chip small" data-n="${esc(n)}" aria-pressed="${st.nameSel === n}">${esc(n)}</button>`).join('')}<button type="button" class="chip small" data-n="+" aria-pressed="${st.nameSel === '+'}">＋ その他（自由入力）</button></div></div>
+        ${st.nameSel === '+' ? `<label class="field"><span class="flabel">${pt ? 'ポイント名' : '口座名'}を入力</span><input id="aName" type="text" maxlength="20" autocomplete="off" placeholder="${pt ? '例：Pontaポイント、JALマイル' : '例：地方銀行、会社の財形'}" value="${esc(st.name)}"></label>` : ''}
+        <label class="field"><span class="flabel">${pt ? '現在のポイント残高' : '現在の残高'}</span><span class="amount"><b>${pt ? 'pt' : '¥'}</b><input id="aBal" type="text" inputmode="numeric" autocomplete="off" placeholder="0" value="${esc(st.bal)}" aria-label="${pt ? '現在のポイント残高' : '現在の残高'}"></span></label>`;
+    } else if (k === 'stock') {
+      h = `<label class="field"><span class="flabel">銘柄名</span><input id="aName" type="text" maxlength="20" autocomplete="off" placeholder="例：トヨタ自動車、S&P500のインデックス" value="${esc(st.name)}"></label>
+        <label class="field"><span class="flabel">保有株数</span><input id="aQty" type="text" inputmode="decimal" autocomplete="off" placeholder="0" value="${esc(st.qty)}"></label>
+        <label class="field"><span class="flabel">1株の価格（円・手入力）</span><input id="aPrice" type="text" inputmode="decimal" autocomplete="off" placeholder="0" value="${esc(st.price)}"></label>`;
+    } else {
+      h = `<label class="field"><span class="flabel">保有数量（${c.sym}）</span><input id="aQty" type="text" inputmode="decimal" autocomplete="off" placeholder="例：0.05" value="${esc(st.qty)}"></label>
+        <label class="field"><span class="flabel">1 ${c.sym} の価格（円）</span><input id="aPrice" type="text" inputmode="decimal" autocomplete="off" placeholder="自動で取得します" value="${esc(st.price)}"></label>
+        <p class="note" style="margin:6px 4px 0">価格は自動で取得します。取得できないときだけ手入力してください。評価額は 数量 × 価格 で計算します。</p>`;
+    }
+    $a('#aDyn').innerHTML = h + `<p class="note" id="aPrev" style="margin:8px 4px 0;font-weight:600"></p>`;
+    paintPrev();
+  };
+  const paintSw = () => { $a('#aSw').innerHTML = swatchesHtml(st.color); };
+  const paintActions = () => {
+    const box = $a('#aActions');
+    if (confirming) {
+      box.innerHTML = `<div class="confirm"><p><b>「${esc(d.name)}」を削除しますか？</b></p><div class="actions"><button type="button" class="btn" id="aNo">やめる</button><button type="button" class="btn danger solid primary" id="aYes">削除する</button></div></div>`;
+      box.querySelector('#aNo').onclick = () => { confirming = false; paintActions(); };
+      box.querySelector('#aYes').onclick = () => { S.accts = S.accts.filter(a => a.id !== d.id); S.idels[d.id] = {k:'acct', t:Date.now()}; saveMeta(); scheduleSync(); closeSheet(); toast('削除しました'); render(); };
+    } else {
+      box.innerHTML = `<div class="actions">${isNew ? '' : '<button type="button" class="btn danger" id="aDel">削除</button>'}<button type="button" class="btn primary" id="aSave">保存</button></div>`;
+      const del = box.querySelector('#aDel');
+      if (del) del.onclick = () => { confirming = true; paintActions(); };
+      box.querySelector('#aSave').onclick = save;
+    }
+  };
+  function save() {
+    const k = st.kind;
+    if (!st.owner) { setErr('持ち主（夫・妻・共有）を選んでください。'); return; }
+    let name;
+    if (isNamed(k)) {
+      name = (st.nameSel === '+' ? st.name : st.nameSel).trim();
+      if (!name) { setErr(`${k === 'point' ? 'ポイント名' : '口座名'}を選ぶか、「＋ その他」で入力してください。`); return; }
+    } else if (k === 'stock') {
+      name = st.name.trim();
+      if (!name) { setErr('銘柄名を入力してください。'); return; }
+    } else name = COINS[k].name;
+    const out = {id:d.id, kind:k, owner:st.owner, name:name.slice(0, 20), bal:0, qty:0, price:0, note:$a('#aNote').value.trim().slice(0, 30), color:st.color, u:item ? item.u : 0};
+    if (isNamed(k)) {
+      if (!st.bal) { setErr(k === 'point' ? 'ポイント残高を入力してください（0でも入力できます）。' : '残高を入力してください（0円でも入力できます）。'); return; }
+      out.bal = Number(st.bal);
+    } else {
+      const q = parseFloat(st.qty);
+      if (st.qty === '' || !Number.isFinite(q)) { setErr(k === 'stock' ? '保有株数を入力してください。' : '保有数量を入力してください。'); return; }
+      out.qty = Math.round(q * 1e8) / 1e8;
+      const p = parseFloat(st.price);
+      if (k === 'stock') {
+        if (st.price === '' || !Number.isFinite(p)) { setErr('1株の価格を入力してください（円）。'); return; }
+        out.price = p;
+      } else if (st.price !== '' && Number.isFinite(p) && p > 0 && (!S.prices[k] || S.prices[k].p !== p)) {
+        S.prices[k] = {p, t: Date.now(), manual: true};   // 取得できないときの手入力
+      }
+    }
+    out.m = Date.now();
+    const changed = isNew || out.bal !== item.bal || out.qty !== item.qty || out.price !== item.price;
+    if (changed) out.u = Date.now();
+    if (isNamed(k) && st.nameSel === '+' && !namesFor(k).includes(out.name)) {                                              // 次回から一覧に出る
+      if (k === 'point') S.pointNames = [...S.pointNames, out.name].slice(-40); else S.acctNames = [...S.acctNames, out.name].slice(-40);
+    }
+    S.accts = isNew ? [...S.accts, out] : S.accts.map(a => a.id === out.id ? out : a);
+    saveMeta(); scheduleSync(); closeSheet(); toast('保存しました'); render();
+  }
+  sheet.onclick = e => {
+    const t = e.target;
+    const kb = t.closest('#aKinds button[data-k]');
+    if (kb) {
+      st.kind = kb.dataset.k; st.qty = ''; st.bal = ''; st.nameSel = ''; st.name = '';
+      st.price = COINS[st.kind] && S.prices[st.kind] ? String(S.prices[st.kind].p) : '';
+      paintTop(); paintDyn(); setErr(''); return;
+    }
+    const ob = t.closest('#aOwners button[data-o]');
+    if (ob) { st.owner = ob.dataset.o; paintTop(); setErr(''); return; }
+    const nb = t.closest('#aNames button[data-n]');
+    if (nb) {
+      st.nameSel = nb.dataset.n;
+      if (st.nameSel === '+') { if (namesFor(st.kind).includes(st.name)) st.name = ''; } else st.name = st.nameSel;
+      paintDyn(); setErr('');
+      if (st.nameSel === '+') { const n = $a('#aName'); if (n) n.focus(); } else { const b = $a('#aBal'); if (b) b.focus(); }
+      return;
+    }
+    const cb = t.closest('#aSw button[data-c]');
+    if (cb) { st.color = cb.dataset.c; paintSw(); }
+  };
+  sheet.oninput = e => {
+    const t = e.target;
+    setErr('');
+    if (t.id === 'aName') st.name = t.value;
+    else if (t.id === 'aBal') { st.bal = numClean(t.value, 0).slice(0, 12); if (t.value !== st.bal) t.value = st.bal; paintPrev(); }
+    else if (t.id === 'aQty') { st.qty = numClean(t.value, st.kind === 'stock' ? 4 : 8); if (t.value !== st.qty) t.value = st.qty; paintPrev(); }
+    else if (t.id === 'aPrice') { st.price = numClean(t.value, 2); if (t.value !== st.price) t.value = st.price; paintPrev(); }
+  };
+  $a('#aClose').onclick = closeSheet;
+  paintTop(); paintDyn(); paintSw(); paintActions();
+  if (isNew && isNamed(st.kind) && !st.nameSel) setTimeout(() => { try { $a('#aOwners button').focus(); } catch (e) {} }, 60);
+}
+
+/* ===== エントリー ===== */
+const fmtYMD = s => { const [y, m, d] = s.split('-').map(Number); return y === new Date().getFullYear() ? `${m}/${d}` : `${y}/${m}/${d}`; };
+const daysBetween = (a, b) => Math.round((Date.UTC(...b.split('-').map((n, i) => i === 1 ? n - 1 : +n)) - Date.UTC(...a.split('-').map((n, i) => i === 1 ? n - 1 : +n))) / DAY);
+/* 未達成で、実行日か期限の日が来た（今日以前）エントリー */
+const entryAlert = (e, today) => !e.done && ((e.run && e.run <= today) || (e.due && e.due <= today));
+function updateEntryBadge() {
+  const btn = document.querySelector('.tab[data-tab="entry"]'); if (!btn) return;
+  const n = S.entries.filter(e => entryAlert(e, todayStr())).length;
+  let b = btn.querySelector('.tbadge');
+  if (!n) { if (b) b.remove(); btn.removeAttribute('data-alert'); return; }
+  if (!b) { b = document.createElement('i'); b.className = 'tbadge'; btn.appendChild(b); }
+  b.textContent = n > 9 ? '9+' : String(n);
+  btn.dataset.alert = n;
+  btn.setAttribute('aria-label', `エントリー（日付になった未達成が${n}件）`);
+}
+function toggleEntry(id) {
+  const e = S.entries.find(x => x.id === id); if (!e) return;
+  const was = e.done;
+  e.done = was ? '' : todayStr(); e.u = Date.now();
+  saveMeta(); scheduleSync(); renderEntries(); updateEntryBadge();
+  toast(was ? '未達成に戻しました' : `達成しました${e.pt ? `（${e.pt.toLocaleString('ja-JP')} pt）` : ''}`, {action:'元に戻す', fn: () => { e.done = was; e.u = Date.now(); saveMeta(); scheduleSync(); renderEntries(); updateEntryBadge(); }});
+}
+function renderEntries() {
+  const box = $('#entry');
+  if (!store.loaded) { box.innerHTML = '<div class="card"><p class="muted" style="margin:0">読み込み中…</p></div>'; return; }
+  if (!S.entries.length) {
+    box.innerHTML = `<div class="welcome card"><h2>エントリーを登録しましょう</h2><p>キャンペーンなどの「実行日・期限・内容・付与pt」を登録し、済んだものにチェックを入れると達成日が自動で入り、行がグレーになります。右上の「＋」からも追加できます。</p><button type="button" class="btn primary" data-act="addentry">エントリーを追加する</button></div>`;
+    return;
+  }
+  const today = todayStr();
+  const key = v => v || '9999-99-99';
+  const cmp = (a, b) => key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0;
+  const open = S.entries.filter(e => !e.done).sort((a, b) => cmp(a.due, b.due) || cmp(a.run, b.run) || a.u - b.u);
+  const done = S.entries.filter(e => e.done).sort((a, b) => cmp(b.done, a.done));
+  const sum = l => l.reduce((s, e) => s + e.pt, 0);
+  const pt = n => n.toLocaleString('ja-JP');
+  const row = e => {
+    const runHit = !e.done && e.run && e.run <= today, dueHit = !e.done && e.due && e.due <= today;
+    const cell = (cls, txt) => `<span class="ec ${cls}">${txt ? esc(txt) : ''}</span>`;
+    return `<div class="etr${e.done ? ' done' : ''}" role="row" data-act="editentry" data-id="${esc(e.id)}">
+      <span class="ec c-chk"><button type="button" class="echk" data-act="toggleentry" data-id="${esc(e.id)}" aria-pressed="${!!e.done}" aria-label="${esc(e.title)}を${e.done ? '未達成に戻す' : '達成にする'}"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span></button></span>
+      ${cell('c-run' + (runHit ? ' hit' : ''), e.run ? fmtYMD(e.run) : '')}
+      ${cell('c-due' + (dueHit ? ' hit' : ''), e.due ? fmtYMD(e.due) : '')}
+      <span class="ec c-title${runHit || dueHit ? ' alert' : ''}"><button type="button" class="elink" data-act="editentry" data-id="${esc(e.id)}">${esc(e.title)}</button></span>
+      ${cell('c-memo', e.memo)}
+      ${cell('c-pt', e.pt ? '+' + pt(e.pt) + ' pt' : '')}
+      ${cell('c-done', e.done ? fmtYMD(e.done) : '')}
+    </div>`;
+  };
+  box.innerHTML = `
+    <div class="esum"><span>未達成 <b>${open.length}件</b>・<b>${pt(sum(open))} pt</b></span><span>達成済み <b>${done.length}件</b>・<b>${pt(sum(done))} pt</b></span></div>
+    <div class="escroll" role="table" aria-label="エントリー一覧">
+      <div class="etable">
+        <div class="etr ehead" role="row"><span class="ec c-chk"><span class="sr">達成</span></span><span class="ec c-run">実行日</span><span class="ec c-due">期限</span><span class="ec c-title">内容</span><span class="ec c-memo">詳細</span><span class="ec c-pt">付与pt</span><span class="ec c-done">達成日</span></div>
+        ${open.map(row).join('')}${done.map(row).join('')}
+      </div>
+    </div>
+    <p class="note">左のチェックで達成日が自動で入り、行がグレーになります（もう一度押すと戻ります）。行をタップすると編集できます。表は左右にスクロールできます。右上の「＋」で追加します。</p>`;
+}
+function openEntrySheet(item) {
+  const isNew = !item;
+  const st = item ? {title:item.title, memo:item.memo, run:item.run, due:item.due, pt:item.pt ? String(item.pt) : ''} : {title:'', memo:'', run:'', due:'', pt:''};
+  let confirming = false;
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>エントリーを${isNew ? '追加' : '編集'}</h2>${closeBtn('eClose')}</div>
+    <label class="field" style="margin-top:0"><span class="flabel">内容</span><input id="eTitle" type="text" maxlength="40" autocomplete="off" placeholder="例：ポイント2倍キャンペーン"></label>
+    <label class="field"><span class="flabel">詳細（任意）</span><textarea id="eMemo" maxlength="200" rows="3" style="min-height:84px;font-family:inherit;font-size:15px" placeholder="例：条件、対象店舗、URLなど"></textarea></label>
+    <label class="field"><span class="flabel">実行日（任意）</span><input id="eRun" type="date"></label>
+    <label class="field"><span class="flabel">期限（任意）</span><input id="eDue" type="date"></label>
+    <label class="field"><span class="flabel">付与pt（任意）</span><span class="amount"><b>pt</b><input id="ePt" type="text" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="付与pt"></span></label>
+    ${!isNew && item.done ? `<p class="note" style="margin-left:0">達成日：${esc(fmtYMD(item.done))}（一覧のチェックを外すと未達成に戻ります）</p>` : ''}
+    <div class="sheet-foot"><p class="err" id="eErr" role="alert" style="min-height:0;margin:0 0 6px"></p><div id="eActions"></div></div>`, `エントリーを${isNew ? '追加' : '編集'}`);
+  const $e = id => sheet.querySelector(id);
+  const setErr = m => { $e('#eErr').textContent = m || ''; };
+  $e('#eTitle').value = st.title; $e('#eMemo').value = st.memo; $e('#eRun').value = st.run; $e('#eDue').value = st.due; $e('#ePt').value = st.pt;
+  function save() {
+    const title = $e('#eTitle').value.trim();
+    if (!title) { setErr('内容を入力してください。'); return; }
+    const out = cleanEntry({id: isNew ? 'e' + uid() : item.id, title, memo: $e('#eMemo').value.trim(), run: $e('#eRun').value, due: $e('#eDue').value, pt: $e('#ePt').value, done: isNew ? '' : item.done, u: Date.now()});
+    S.entries = isNew ? [...S.entries, out] : S.entries.map(x => x.id === out.id ? out : x);
+    saveMeta(); scheduleSync(); closeSheet(); toast('保存しました'); render();
+  }
+  const paintActions = () => {
+    const box = $e('#eActions');
+    if (confirming) {
+      box.innerHTML = `<div class="confirm"><p><b>「${esc(item.title)}」を削除しますか？</b></p><div class="actions"><button type="button" class="btn" id="eNo">やめる</button><button type="button" class="btn danger solid primary" id="eYes">削除する</button></div></div>`;
+      box.querySelector('#eNo').onclick = () => { confirming = false; paintActions(); };
+      box.querySelector('#eYes').onclick = () => { S.entries = S.entries.filter(x => x.id !== item.id); S.idels[item.id] = {k:'entry', t:Date.now()}; saveMeta(); scheduleSync(); closeSheet(); toast('削除しました'); render(); };
+    } else {
+      box.innerHTML = `<div class="actions">${isNew ? '' : '<button type="button" class="btn danger" id="eDel">削除</button>'}<button type="button" class="btn primary" id="eSave">保存</button></div>`;
+      const del = box.querySelector('#eDel');
+      if (del) del.onclick = () => { confirming = true; paintActions(); };
+      box.querySelector('#eSave').onclick = save;
+    }
+  };
+  sheet.oninput = e => {
+    setErr('');
+    if (e.target.id === 'ePt') { const v = numClean(e.target.value, 0).slice(0, 9); if (e.target.value !== v) e.target.value = v; }
+  };
+  $e('#eClose').onclick = closeSheet;
+  paintActions();
+  if (isNew) setTimeout(() => { try { $e('#eTitle').focus(); } catch (err) {} }, 60);
+}
+
+/* ===== トレード（ビットコイン・株） ===== */
+const isStock = t => t.k === 'stock';
+const btcNow = () => (S.prices.btc && S.prices.btc.p > 0) ? S.prices.btc : null;
+const tradeCost = t => Math.round(t.bp * t.bq);
+const tradeRealized = t => t.sp === null ? null : Math.round((t.sp - t.bp) * t.sq);    // 売った分の差額（売値 − 買値）× 売り枚数
+const tradeFloating = t => { const n = btcNow(); return !isStock(t) && t.sp === null && !t.done && n ? Math.round((n.p - t.bp) * t.bq) : null; };   // ビットコインの未売却分の「今」の差額
+const signedYen = n => (n > 0 ? '+' : n < 0 ? '−' : '') + yen(n);
+const diffCls = n => n > 0 ? 'plus' : n < 0 ? 'minus' : '';
+function toggleTrade(id) {
+  const t = S.trades.find(x => x.id === id); if (!t) return;
+  const was = {done: t.done, sd: t.sd};
+  t.done = !t.done;
+  if (t.done && !t.sd) t.sd = todayStr();       // 決済済みにしたとき、売買日が空なら今日を入れる
+  t.u = Date.now();
+  saveMeta(); scheduleSync(); renderTrades();
+  toast(t.done ? '決済済みにしました' : '未決済に戻しました', {action:'元に戻す', fn: () => { t.done = was.done; t.sd = was.sd; t.u = Date.now(); saveMeta(); scheduleSync(); renderTrades(); }});
+}
+function renderTrades() {
+  const box = $('#trade');
+  if (!store.loaded) { box.innerHTML = '<div class="card"><p class="muted" style="margin:0">読み込み中…</p></div>'; return; }
+  const key = v => v || '0000-00-00';
+  const sortList = list => [
+    ...list.filter(t => !t.done).sort((a, b) => key(b.bd) < key(a.bd) ? -1 : key(b.bd) > key(a.bd) ? 1 : b.u - a.u),
+    ...list.filter(t => t.done).sort((a, b) => key(b.sd) < key(a.sd) ? -1 : key(b.sd) > key(a.sd) ? 1 : b.u - a.u)];
+  const btc = S.trades.filter(t => !isStock(t)), stk = S.trades.filter(isStock);
+  const now = btcNow();
+  const head = (name, n, kind) => `<div class="acghead tgh"><span class="acgtoggle" style="cursor:default"><span class="acgname">${name}</span><span class="acgcnt">${n}件</span></span><button type="button" class="icon-btn sm" data-act="addtrade" data-kind="${kind}" aria-label="${name}のトレードを追加"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button></div>`;
+  const cell = (cls, html) => `<span class="ec ${cls}">${html || ''}</span>`;
+  const chk = t => `<span class="ec c-chk"><button type="button" class="echk" data-act="toggletrade" data-id="${esc(t.id)}" aria-pressed="${t.done}" aria-label="${isStock(t) ? esc(t.name) + 'を' : ''}${t.done ? '未決済に戻す' : '決済済みにする'}"><span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span></button></span>`;
+  const link = (t, html) => `<button type="button" class="elink" data-act="edittrade" data-id="${esc(t.id)}">${html}</button>`;
+  // ----- ビットコイン -----
+  const btcRow = t => {
+    const r = tradeRealized(t), f = tradeFloating(t);
+    const live = t.sp === null && !t.done;
+    const sellCell = t.sp !== null ? yen(t.sp) : live ? (now ? `<small class="nowtag">現在</small>${yen(now.p)}` : '<span class="muted">取得中…</span>') : '';
+    const diffCell = r !== null ? signedYen(r) : f !== null ? `<small class="nowtag">今</small>${signedYen(f)}` : '';
+    const d = r !== null ? r : f;
+    return `<div class="etr ttr${t.done ? ' done' : ''}" role="row" data-act="edittrade" data-id="${esc(t.id)}">${chk(t)}
+      ${cell('c-run', link(t, t.bd ? esc(fmtYMD(t.bd)) : '<span class="muted">日付なし</span>'))}
+      ${cell('c-due', t.sd ? esc(fmtYMD(t.sd)) : '')}${cell('c-num', yen(t.bp))}${cell('c-num', esc(fmtQty(t.bq, 8)))}
+      ${cell('c-num' + (live ? ' live' : ''), sellCell)}${cell('c-num', t.sq === null ? '' : esc(fmtQty(t.sq, 8)))}
+      ${cell('c-num c-diff ' + diffCls(d), diffCell)}
+    </div>`;
+  };
+  const realized = btc.reduce((s, t) => s + (tradeRealized(t) || 0), 0);
+  const floats = btc.map(tradeFloating).filter(v => v !== null);
+  const floating = floats.reduce((s, v) => s + v, 0);
+  const priceLine = priceBusy ? '価格を取得中…' : now ? `現在のBTC価格 <b>${yen(now.p)}</b>（${fmtMDHM(now.t)}時点）` : '現在のBTC価格を取得できていません';
+  const btcHtml = head('ビットコイン', btc.length, 'btc') + (btc.length ? `
+    <div class="esum"><span>${priceLine}</span><button type="button" class="chip small" data-act="trade-refresh"${priceBusy ? ' disabled' : ''}>価格を更新</button></div>
+    <div class="esum"><span>確定した差額 <b class="${diffCls(realized)}">${signedYen(realized)}</b>（売却${btc.filter(t => t.sp !== null).length}件）</span><span>今の差額 <b class="${diffCls(floating)}">${floats.length ? signedYen(floating) : '―'}</b>（未売却${floats.length}件）</span></div>
+    ${priceNote ? `<div class="meter-cap" style="color:var(--warn);margin:0 4px 8px">${esc(priceNote)}</div>` : ''}
+    <div class="escroll" role="table" aria-label="ビットコインのトレード一覧"><div class="etable">
+      <div class="etr ttr ehead" role="row"><span class="ec c-chk"><span class="sr">決済済み</span></span><span class="ec c-run">購入日</span><span class="ec c-due">売買日</span><span class="ec c-num">買値</span><span class="ec c-num">買い枚数</span><span class="ec c-num">売値</span><span class="ec c-num">売り枚数</span><span class="ec c-num">差額</span></div>
+      ${sortList(btc).map(btcRow).join('')}
+    </div></div>
+    <p class="note">買値・売値は1BTCあたりの円です。まだ売っていない行は、売値に今のビットコインの価格（「現在」の印）、差額に今売ったとしたときの差額（「今」の印）が出ます（画面を開いている間、約30秒ごとに更新）。売ったあとは、行を開いて売値・売り枚数を入れると差額が確定します。差額＝（売値 − 買値）× 売り枚数。</p>` : '<div class="empty acg-empty">登録なし（右の「＋」で追加）</div>');
+  // ----- 株 -----
+  const stkRow = t => {
+    const r = tradeRealized(t);
+    return `<div class="etr ttr stk${t.done ? ' done' : ''}" role="row" data-act="edittrade" data-id="${esc(t.id)}">${chk(t)}
+      ${cell('c-title', link(t, esc(t.name)))}
+      ${cell('c-run', t.bd ? esc(fmtYMD(t.bd)) : '')}${cell('c-due', t.sd ? esc(fmtYMD(t.sd)) : '')}
+      ${cell('c-num', yen(t.bp))}${cell('c-num', esc(fmtQty(t.bq, 4)))}
+      ${cell('c-num', t.sp === null ? '' : yen(t.sp))}${cell('c-num', t.sq === null ? '' : esc(fmtQty(t.sq, 4)))}
+      ${cell('c-num c-diff ' + diffCls(r), r === null ? '' : signedYen(r))}
+    </div>`;
+  };
+  const sRealized = stk.reduce((s, t) => s + (tradeRealized(t) || 0), 0);
+  const sOpen = stk.filter(t => t.sp === null && !t.done);
+  const stkHtml = head('株', stk.length, 'stock') + (stk.length ? `
+    <div class="esum"><span>確定した差額 <b class="${diffCls(sRealized)}">${signedYen(sRealized)}</b>（売却${stk.filter(t => t.sp !== null).length}件）</span><span>未売却 <b>${sOpen.length}件</b>・買い金額 <b>${yen(sOpen.reduce((s, t) => s + tradeCost(t), 0))}</b></span></div>
+    <div class="escroll" role="table" aria-label="株のトレード一覧"><div class="etable">
+      <div class="etr ttr stk ehead" role="row"><span class="ec c-chk"><span class="sr">決済済み</span></span><span class="ec c-title">銘柄</span><span class="ec c-run">購入日</span><span class="ec c-due">売買日</span><span class="ec c-num">買い単価</span><span class="ec c-num">枚数</span><span class="ec c-num">売り単価</span><span class="ec c-num">枚数</span><span class="ec c-num">差額</span></div>
+      ${sortList(stk).map(stkRow).join('')}
+    </div></div>
+    <p class="note">株は、売り単価の価格の自動反映はありません。売ったときに、行を開いて売り単価・枚数を入れてください。差額＝（売り単価 − 買い単価）× 売りの枚数。</p>` : '<div class="empty acg-empty">登録なし（右の「＋」で追加）</div>');
+  box.innerHTML = `${btcHtml}<div style="height:22px"></div>${stkHtml}<p class="note">左のチェックで決済済み（グレー）になります。行をタップすると編集できます。表は左右にスクロールできます。</p>`;
+}
+function openTradeSheet(item, initKind) {
+  const isNew = !item;
+  const stock = item ? isStock(item) : initKind === 'stock';
+  let confirming = false;
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>トレードを${isNew ? '追加' : '編集'}</h2>${closeBtn('tClose')}</div>
+    ${isNew ? `<div class="chips" id="tKinds" style="margin-bottom:4px"><button type="button" class="chip small" data-k="btc" aria-pressed="${!stock}">ビットコイン</button><button type="button" class="chip small" data-k="stock" aria-pressed="${stock}">株</button></div>` : `<div style="font-weight:600">${stock ? '株' : 'ビットコイン'}</div>`}
+    ${stock ? `<label class="field"><span class="flabel">銘柄</span><input id="tName" type="text" maxlength="20" autocomplete="off" placeholder="例：トヨタ自動車、7203"></label>` : ''}
+    <label class="field" style="margin-top:${stock ? 16 : 12}px"><span class="flabel">購入日（任意）</span><input id="tBd" type="date"></label>
+    <label class="field"><span class="flabel">${stock ? '買い単価（1株あたり・円）' : '買値（1BTCあたり・円）'}</span><span class="amount"><b>¥</b><input id="tBp" type="text" inputmode="${stock ? 'decimal' : 'numeric'}" autocomplete="off" placeholder="0" aria-label="買い単価"></span></label>
+    <label class="field"><span class="flabel">${stock ? '枚数（株数）' : '買い枚数（BTC）'}</span><span class="amount"><b>${stock ? '株' : 'BTC'}</b><input id="tBq" type="text" inputmode="decimal" autocomplete="off" placeholder="${stock ? '100' : '0.05'}" aria-label="買い枚数"></span></label>
+    <p class="note" id="tCost" style="margin:6px 4px 0;font-weight:600"></p>
+    <div class="section-title" style="font-size:15px;margin:22px 4px 0">売ったとき（売っていなければ空のまま）</div>
+    <label class="field" style="margin-top:8px"><span class="flabel">売買日（任意）</span><input id="tSd" type="date"></label>
+    <label class="field"><span class="flabel">${stock ? '売り単価（1株あたり・円）' : '売値（1BTCあたり・円）'}</span><span class="amount"><b>¥</b><input id="tSp" type="text" inputmode="${stock ? 'decimal' : 'numeric'}" autocomplete="off" placeholder="0" aria-label="売り単価"></span></label>
+    ${stock ? '' : '<div style="margin-top:6px"><button type="button" class="chip small" id="tNow">今の価格を入れる</button><span class="note" id="tNowNote" style="margin-left:8px"></span></div>'}
+    <label class="field"><span class="flabel">${stock ? '売りの枚数（株数・空なら買いと同じ）' : '売り枚数（BTC・空なら買い枚数と同じ）'}</span><span class="amount"><b>${stock ? '株' : 'BTC'}</b><input id="tSq" type="text" inputmode="decimal" autocomplete="off" placeholder="" aria-label="売り枚数"></span></label>
+    <p class="note" id="tPrev" style="margin:8px 4px 0;font-weight:600"></p>
+    <div class="sheet-foot"><p class="err" id="tErr" role="alert" style="min-height:0;margin:0 0 6px"></p><div id="tActions"></div></div>`, `トレードを${isNew ? '追加' : '編集'}`);
+  const $t = id => sheet.querySelector(id);
+  const setErr = m => { $t('#tErr').textContent = m || ''; };
+  if (item) { if (stock) $t('#tName').value = item.name; $t('#tBd').value = item.bd; $t('#tSd').value = item.sd; $t('#tBp').value = String(item.bp); $t('#tBq').value = String(item.bq); $t('#tSp').value = item.sp === null ? '' : String(item.sp); $t('#tSq').value = item.sq === null ? '' : String(item.sq); }
+  const nowP = () => btcNow();
+  if (!stock) $t('#tNowNote').textContent = nowP() ? `現在 ${yen(nowP().p)}` : '価格を取得できていません';
+  const num = id => { const v = parseFloat($t(id).value); return Number.isFinite(v) ? v : null; };
+  const paintPrev = () => {
+    const bp = num('#tBp'), bq = num('#tBq'), sp = num('#tSp');
+    $t('#tCost').textContent = bp !== null && bq !== null ? `買い金額（単価 × 枚数）＝ ${yen(Math.round(bp * bq))}` : '';
+    if (bp !== null && bq !== null && sp !== null) {
+      const sq = num('#tSq') ?? bq;
+      $t('#tPrev').textContent = `売り金額 ${yen(Math.round(sp * sq))} ／ 差額（売り単価 − 買い単価）× 売りの枚数 ＝ ${signedYen(Math.round((sp - bp) * sq))}`;
+    } else if (!stock && bp !== null && bq !== null && nowP()) {
+      $t('#tPrev').textContent = `今の価格で売ると、差額は ${signedYen(Math.round((nowP().p - bp) * bq))}`;
+    } else $t('#tPrev').textContent = '';
+  };
+  function save() {
+    const name = stock ? $t('#tName').value.trim() : '';
+    if (stock && !name) { setErr('銘柄を入力してください。'); return; }
+    const bp = num('#tBp'), bq = num('#tBq');
+    if (bp === null) { setErr(stock ? '買い単価（1株あたりの円）を入力してください。' : '買値（1BTCあたりの円）を入力してください。'); return; }
+    if (bq === null || bq <= 0) { setErr('枚数を入力してください。'); return; }
+    const sp = num('#tSp');
+    const out = cleanTrade({id: isNew ? 't' + uid() : item.id, k: stock ? 'stock' : undefined, name, bd: $t('#tBd').value, sd: $t('#tSd').value, bp, bq, sp, sq: sp === null ? null : num('#tSq'), done: isNew ? false : item.done, u: Date.now()});
+    if (!out) { setErr('金額・枚数を確認してください。'); return; }
+    S.trades = isNew ? [...S.trades, out] : S.trades.map(x => x.id === out.id ? out : x);
+    saveMeta(); scheduleSync(); closeSheet(); toast('保存しました'); render();
+  }
+  const paintActions = () => {
+    const box = $t('#tActions');
+    if (confirming) {
+      box.innerHTML = `<div class="confirm"><p><b>${stock ? '「' + esc(item.name) + '」の' : ''}このトレードを削除しますか？</b></p><div class="actions"><button type="button" class="btn" id="tNo">やめる</button><button type="button" class="btn danger solid primary" id="tYes">削除する</button></div></div>`;
+      box.querySelector('#tNo').onclick = () => { confirming = false; paintActions(); };
+      box.querySelector('#tYes').onclick = () => { S.trades = S.trades.filter(x => x.id !== item.id); S.idels[item.id] = {k:'trade', t:Date.now()}; saveMeta(); scheduleSync(); closeSheet(); toast('削除しました'); render(); };
+    } else {
+      box.innerHTML = `<div class="actions">${isNew ? '' : '<button type="button" class="btn danger" id="tDel">削除</button>'}<button type="button" class="btn primary" id="tSave">保存</button></div>`;
+      const del = box.querySelector('#tDel');
+      if (del) del.onclick = () => { confirming = true; paintActions(); };
+      box.querySelector('#tSave').onclick = save;
+    }
+  };
+  sheet.onclick = e => { const kb = e.target.closest('#tKinds button[data-k]'); if (kb && (kb.dataset.k === 'stock') !== stock) openTradeSheet(null, kb.dataset.k); };
+  sheet.oninput = e => {
+    setErr('');
+    const id = e.target.id;
+    if (id === 'tBp' || id === 'tSp') { const v = numClean(e.target.value, stock ? 2 : 0).slice(0, 13); if (e.target.value !== v) e.target.value = v; paintPrev(); }
+    else if (id === 'tBq' || id === 'tSq') { const v = numClean(e.target.value, stock ? 4 : 8).slice(0, 14); if (e.target.value !== v) e.target.value = v; paintPrev(); }
+  };
+  const nowBtn = $t('#tNow');
+  if (nowBtn) nowBtn.onclick = () => { if (!nowP()) { setErr('今の価格を取得できていません。少し待ってからお試しください。'); return; } $t('#tSp').value = String(Math.round(nowP().p)); if (!$t('#tSd').value) $t('#tSd').value = todayStr(); setErr(''); paintPrev(); };
+  $t('#tClose').onclick = closeSheet;
+  paintPrev(); paintActions();
+}
+
 /* ===== 入力シート ===== */
 function defaultDate() { const t = todayStr(); return t.slice(0,7) === ui.month ? t : ui.month + '-01'; }
 const payChips = (selected, orig) => {
@@ -900,8 +1720,9 @@ function openTxSheet(orig) {
     <label class="field"><span class="flabel">金額</span><span class="amount"><b>¥</b><input id="fAmt" type="text" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="金額"></span></label>
     <div class="field"><span class="flabel">カテゴリ</span><div class="chips" id="fCats"></div></div>
     <label class="field"><span class="flabel">日付</span><input id="fDate" type="date"></label>
-    <div class="field"><span class="flabel">支払方法</span><div class="chips" id="fPays"></div><p class="hint" id="fHint" hidden></p></div>
+    <div class="field"><span class="flabel">支払方法</span><div class="chips" id="fPays"></div></div>
     <label class="field"><span class="flabel">メモ</span><input id="fMemo" type="text" maxlength="80" placeholder="例：スーパー" autocomplete="off"></label>
+    <div id="fRecBox"></div>
     <p class="err" id="fErr" role="alert"></p>
     <div class="sheet-foot" id="fActions"></div>`, orig ? '記録を編集' : '記録を入力');
 
@@ -923,21 +1744,25 @@ function openTxSheet(orig) {
       ? items.map(c => `<button type="button" class="chip" data-c="${esc(c.id)}" aria-pressed="${c.id === d.c}"><i class="dot" style="background:${c.color}"></i>${esc(c.name)}</button>`).join('')
       : '<span class="muted">カテゴリがありません。設定から追加してください。</span>';
   };
-  const paintHint = () => {
-    const h = sheet.querySelector('#fHint'), a = assetByPay(d.p);
-    if (!a) { h.hidden = true; return; }
-    const amt = Number(normDigits(fAmt.value).replace(/[^\d]/g, '')) || 0;
-    const cur = assetBalance(a, orig && orig.id);
-    const after = cur + (d.t === 'i' ? amt : -amt);
-    h.hidden = false; h.className = 'hint' + (after < 0 ? ' low' : '');
-    h.innerHTML = `${esc(a.name)}の残高 <b>${b0(cur)}</b>${amt ? ` → <b class="after">${b0(after)}</b>` : ''}`;
+  const paintPays = () => { sheet.querySelector('#fPays').innerHTML = payChips(d.p, orig); };
+  // 「毎月」のチェック（支出のみ）。同じ系列の最新の月でチェックを外すと停止する
+  const series = orig && orig.rid ? latestOfSeries(orig.rid) : null;
+  const notLatest = !!(series && series.id !== orig.id);
+  d.rec = !!(orig && orig.rec);
+  const paintRec = () => {
+    const box = sheet.querySelector('#fRecBox');
+    if (d.t !== 'e') { box.innerHTML = ''; return; }
+    let note;
+    if (notLatest) note = `この記録より新しい月（${series.d.slice(0, 4)}年${Number(series.d.slice(5, 7))}月）の記録があります。支払いを止めるときは、最新の月の記録で「毎月」のチェックを外してください。`;
+    else if (orig && orig.rid && !orig.rec) note = '毎月の記録は停止中です。チェックを入れて保存すると、再開します。';
+    else if (orig && orig.rec) note = '支払いが終わったら、チェックを外して保存してください。これ以降は自動で記録されません（記録済みの月は残ります）。';
+    else note = '毎月の同じ日に、同じ金額・カテゴリで自動で記録します。支払いが終わったら、いちばん新しい月の記録でチェックを外してください。';
+    box.innerHTML = `<label class="opt" style="margin-top:14px"><input type="checkbox" id="fRec" ${d.rec ? 'checked' : ''} ${notLatest ? 'disabled' : ''}>毎月支払う</label><p class="note" style="margin:0 4px">${esc(note)}</p>`;
   };
-  const paintPays = () => { sheet.querySelector('#fPays').innerHTML = payChips(d.p, orig); paintHint(); };
-  fAmt.addEventListener('input', paintHint);
   const paintActions = () => {
     const box = sheet.querySelector('#fActions');
     if (confirming) {
-      box.innerHTML = `<div class="confirm"><p><b>この記録を削除しますか？</b>元に戻せません。</p><div class="actions"><button type="button" class="btn" id="fNo">やめる</button><button type="button" class="btn danger solid primary" id="fYes">削除する</button></div></div>`;
+      box.innerHTML = `<div class="confirm"><p><b>この記録を削除しますか？</b>元に戻せません。${orig && orig.rid ? '<br><span class="muted" style="font-size:13px">毎月の支払いを止めるときは、削除ではなく「毎月」のチェックを外してください。</span>' : ''}</p><div class="actions"><button type="button" class="btn" id="fNo">やめる</button><button type="button" class="btn danger solid primary" id="fYes">削除する</button></div></div>`;
       box.querySelector('#fNo').onclick = () => { confirming = false; paintActions(); };
       box.querySelector('#fYes').onclick = () => { deleteTx(orig); closeSheet(); toast('削除しました'); render(); };
     } else {
@@ -957,11 +1782,18 @@ function openTxSheet(orig) {
     const tx = {id: orig ? orig.id : uid(), d: fDate.value, t: d.t, c: d.c, a, p: d.p, n: fMemo.value.trim().slice(0,80), s: orig ? (orig.s || Date.now()) : Date.now()};
     if (orig && orig.mf) tx.mf = orig.mf;
     if (orig && orig.r) tx.r = orig.r;
+    if (d.t === 'e' && (d.rec || (orig && orig.rid))) {                // 毎月の系列。チェックが無ければ停止（系列は覚えておく）
+      tx.rid = (orig && orig.rid) || uid();
+      tx.rd = (orig && orig.rd && orig.d === tx.d) ? orig.rd : Number(tx.d.slice(8));
+      if (d.rec) tx.rec = 1;
+    }
     saveTx(tx, orig);
     ui.lastPay = d.p; ui.lastType = d.t;
     ui.month = tx.d.slice(0,7);
     closeSheet();
-    toast(orig ? '更新しました' : '記録しました');
+    const gen = tx.rec ? materializeRecurring(true) : null;            // 過去の日付で「毎月」にした場合は、今月までの分を追加
+    if (gen && gen.n) toast(`${orig ? '更新しました' : '記録しました'}。毎月の分${gen.n}件も追加しました`, {action: '取り消す', fn: () => undoBatch(gen.batch), ms: 9000});
+    else toast(orig ? '更新しました' : '記録しました');
     render();
   };
   const fmtAmt = () => {
@@ -981,67 +1813,17 @@ function openTxSheet(orig) {
   fAmt.addEventListener('input', () => { if (!composing) { fmtAmt(); err(''); } });
   fAmt.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); fAmt.blur(); } });
   sheet.querySelector('#fClose').onclick = closeSheet;
-  sheet.querySelector('#fType').onclick = e => { const b = e.target.closest('button[data-t]'); if (!b) return; d.t = b.dataset.t; d.c = null; paintHead(); paintCats(); paintHint(); err(''); };
+  sheet.querySelector('#fType').onclick = e => { const b = e.target.closest('button[data-t]'); if (!b) return; d.t = b.dataset.t; d.c = null; paintHead(); paintCats(); paintRec(); err(''); };
+  sheet.querySelector('#fRecBox').onchange = e => { if (e.target.id === 'fRec') d.rec = e.target.checked; };
   sheet.querySelector('#fCats').onclick = e => { const b = e.target.closest('button[data-c]'); if (!b) return; d.c = b.dataset.c; paintCats(); err(''); };
   sheet.querySelector('#fPays').onclick = e => { const b = e.target.closest('button[data-p]'); if (!b) return; d.p = b.dataset.p; paintPays(); };
-  paintHead(); paintCats(); paintPays(); paintActions();
+  paintHead(); paintCats(); paintPays(); paintRec(); paintActions();
   if (!orig) setTimeout(() => { try { fAmt.focus(); } catch (e) {} }, 60);
 }
 
 /* ===== カテゴリ・支払方法の編集シート ===== */
 function swatchesHtml(sel) {
   return PAL.map((c,i) => `<button type="button" class="sw" data-c="${c}" style="background:${c}" aria-label="色${i+1}" aria-pressed="${c === sel}"></button>`).join('');
-}
-function openAssetSheet(item) {
-  const isNew = !item;
-  const d = item ? {...item} : {id:'a_' + uid(), name:'', color:PAL[S.assets.length % PAL.length], base:0, asOf:todayStr(), asOfTs:Date.now(), pay:''};
-  const cur = isNew ? 0 : assetBalance(d);
-  let confirming = false;
-  const sheet = openSheet(`
-    <div class="sheet-head"><h2>資産を${isNew ? '追加' : '編集'}</h2>${closeBtn('aClose')}</div>
-    <label class="field"><span class="flabel">名前</span><input id="aName" type="text" maxlength="16" autocomplete="off" placeholder="例：楽天ポイント"></label>
-    <label class="field"><span class="flabel">現在の残高</span><span class="amount"><b>¥</b><input id="aBal" type="text" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="現在の残高"></span></label>
-    <div class="field"><span class="flabel">連動する支払方法</span><div class="chips" id="aPays"></div>
-      <p class="hint">この支払方法で支出を記録すると、残高が減ります。</p></div>
-    <div class="field"><span class="flabel">色</span><div class="swatches" id="aSw"></div></div>
-    <p class="err" id="aErr" role="alert"></p>
-    <div class="sheet-foot" id="aActions"></div>`, `資産を${isNew ? '追加' : '編集'}`);
-  const aName = sheet.querySelector('#aName'), aBal = sheet.querySelector('#aBal'), aErr = sheet.querySelector('#aErr');
-  aName.value = d.name; aBal.value = cur ? cur.toLocaleString('ja-JP') : '';
-  const paintPays = () => {
-    const chip = (id, name, color) => `<button type="button" class="chip" data-p="${esc(id)}" aria-pressed="${id === d.pay}">${color ? `<i class="dot" style="background:${color}"></i>` : ''}${esc(name)}</button>`;
-    sheet.querySelector('#aPays').innerHTML = chip('', 'なし', '') + S.pays.map(p => chip(p.id, p.name, p.color)).join('');
-  };
-  const paintSw = () => { sheet.querySelector('#aSw').innerHTML = swatchesHtml(d.color); };
-  const paintActions = () => {
-    const box = sheet.querySelector('#aActions');
-    if (confirming) {
-      box.innerHTML = `<div class="confirm"><p><b>「${esc(d.name)}」を削除しますか？</b>支払方法と過去の記録は消えません。</p><div class="actions"><button type="button" class="btn" id="aNo">やめる</button><button type="button" class="btn danger solid primary" id="aYes">削除する</button></div></div>`;
-      box.querySelector('#aNo').onclick = () => { confirming = false; paintActions(); };
-      box.querySelector('#aYes').onclick = () => { S.assets = S.assets.filter(a => a.id !== d.id); saveMeta(); closeSheet(); toast('削除しました'); render(); };
-    } else {
-      box.innerHTML = `<div class="actions">${isNew ? '' : '<button type="button" class="btn danger" id="aDel">削除</button>'}<button type="button" class="btn primary" id="aSave">保存</button></div>`;
-      const del = box.querySelector('#aDel');
-      if (del) del.onclick = () => { confirming = true; paintActions(); };
-      box.querySelector('#aSave').onclick = () => {
-        const name = aName.value.trim();
-        if (!name) { aErr.textContent = '名前を入力してください。'; aName.focus(); return; }
-        if (S.assets.some(a => a.id !== d.id && a.name === name)) { aErr.textContent = '同じ名前の資産があります。'; return; }
-        const raw = normDigits(aBal.value);
-        const neg = /^\s*-/.test(raw);
-        const n = Math.round(Number(raw.replace(/[^\d.]/g, '')) || 0) * (neg ? -1 : 1);
-        d.name = name;
-        if (isNew || n !== cur) { d.base = n; d.asOf = todayStr(); d.asOfTs = Date.now(); }   // 入力した残高を「いまの値」として基準にする
-        S.assets = isNew ? [...S.assets, d] : S.assets.map(a => a.id === d.id ? d : a);
-        saveMeta(); closeSheet(); toast('保存しました'); render();
-      };
-    }
-  };
-  sheet.querySelector('#aClose').onclick = closeSheet;
-  sheet.querySelector('#aPays').onclick = e => { const b = e.target.closest('button[data-p]'); if (!b) return; d.pay = b.dataset.p; paintPays(); };
-  sheet.querySelector('#aSw').onclick = e => { const b = e.target.closest('button[data-c]'); if (!b) return; d.color = b.dataset.c; paintSw(); };
-  aName.addEventListener('input', () => { aErr.textContent = ''; });
-  paintPays(); paintSw(); paintActions();
 }
 function openNameSheet(kind, item, type) {
   const isCat = kind === 'cat';
@@ -1070,7 +1852,6 @@ function openNameSheet(kind, item, type) {
       box.querySelector('#nNo').onclick = () => { confirming = false; paintActions(); };
       box.querySelector('#nYes').onclick = () => {
         if (isCat) S.cats = S.cats.filter(c => c.id !== d.id); else S.pays = S.pays.filter(p => p.id !== d.id);
-        if (!isCat) S.assets.forEach(a => { if (a.pay === d.id) a.pay = ''; });
         saveMeta(); closeSheet(); toast('削除しました'); render();
       };
     } else {
@@ -1153,8 +1934,8 @@ async function exportCsv(scope) {
 
 /* ===== バックアップ ===== */
 async function exportBackup() {
-  if (!realCount() && !Object.keys(S.learn).length) { toast('バックアップする記録がありません'); return; }
-  const data = {app:'kakeibo', version:1, exportedAt:new Date().toISOString(), cats:S.cats, pays:S.pays, learn:S.learn, assets:S.assets, months:S.months};
+  if (!realCount() && !Object.keys(S.learn).length && !S.accts.length && !S.entries.length && !S.trades.length) { toast('バックアップする記録がありません'); return; }
+  const data = {app:'kakeibo', version:1, exportedAt:new Date().toISOString(), cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, trades:S.trades, months:S.months};
   const d = todayStr().replace(/-/g, '');
   const r = await deliverFile(JSON.stringify(data), `kakeibo-backup-${d}.json`, 'application/json');
   if (r === 'shared' || r === 'downloaded') {
@@ -1179,13 +1960,13 @@ async function handleBackupFile(file) {
   const range = ds.length ? `${ds[0]} 〜 ${ds[ds.length-1]}` : '記録なし';
   const sheet = openSheet(`
     <div class="sheet-head"><h2>バックアップから復元</h2>${closeBtn('bClose')}</div>
-    <div class="card"><dl class="kv"><dt>記録</dt><dd>${n.toLocaleString('ja-JP')}件</dd><dt>期間</dt><dd>${esc(range)}</dd><dt>書き出した日時</dt><dd>${esc(obj.exportedAt ? new Date(obj.exportedAt).toLocaleString('ja-JP') : '不明')}</dd></dl></div>
+    <div class="card"><dl class="kv"><dt>記録</dt><dd>${n.toLocaleString('ja-JP')}件</dd><dt>期間</dt><dd>${esc(range)}</dd>${Array.isArray(obj.accts) ? `<dt>現資産の項目</dt><dd>${obj.accts.length}件</dd>` : ''}${Array.isArray(obj.entries) ? `<dt>エントリー</dt><dd>${obj.entries.length}件</dd>` : ''}${Array.isArray(obj.trades) ? `<dt>トレード</dt><dd>${obj.trades.length}件</dd>` : ''}<dt>書き出した日時</dt><dd>${esc(obj.exportedAt ? new Date(obj.exportedAt).toLocaleString('ja-JP') : '不明')}</dd></dl></div>
     ${bad ? `<p class="note">読み取れない記録が${bad}件ありました。それらは復元されません。</p>` : ''}
     <p class="err" style="min-height:0;margin-top:14px"><b>いま入っている記録${realCount().toLocaleString('ja-JP')}件は、すべてこのバックアップの内容に置き換わります。</b></p>
     <div class="sheet-foot"><div class="actions"><button type="button" class="btn" id="bNo">やめる</button><button type="button" class="btn danger solid primary" id="bYes">置き換えて復元</button></div></div>`, 'バックアップから復元');
   sheet.querySelector('#bClose').onclick = sheet.querySelector('#bNo').onclick = closeSheet;
   sheet.querySelector('#bYes').onclick = () => {
-    applyLoaded(months, {cats:obj.cats, pays:obj.pays, learn:obj.learn, assets:obj.assets, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+    applyLoaded(months, {cats:obj.cats, pays:obj.pays, learn:obj.learn, accts:obj.accts, acctNames:obj.acctNames, pointNames:obj.pointNames, entries:obj.entries, trades:obj.trades, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
     saveAll();
     closeSheet(); toast(`${n.toLocaleString('ja-JP')}件を復元しました`); render();
   };
@@ -1669,7 +2450,7 @@ function openReceiptReview(info, rawText, thumb) {
   const R = {
     id: uid(), date: info.date || todayStr(), store: info.store || '', brand: info.brand || '', seq: info.seq || '',
     pay: brandPay || ((info.pay && S.pays.some(p => p.id === info.pay)) ? info.pay : (S.pays.some(p => p.id === ui.lastPay) ? ui.lastPay : (S.pays[0] ? S.pays[0].id : ''))),
-    mode: info.items.length ? 'items' : 'single', learn: true, total: info.total, readN: info.items.length,
+    mode: info.items.length ? 'items' : 'single', learn: true, total: info.total, totalGuess: !!info.totalGuess, readN: info.items.length,
     items: info.items.map(it => { const s = suggestCat(it.label, info.store); return {label:it.label, amt:it.amount, neg:it.neg, cat:s ? s.c : '', sug:!!s, inc:true}; }),
     singleCat: '', singleSug: false, singleAmt: 0
   };
@@ -1738,7 +2519,7 @@ function openReceiptReview(info, rawText, thumb) {
         <label class="field"><span class="flabel">金額</span><span class="amount"><b>¥</b><input id="rSAmt" type="text" inputmode="numeric" value="${R.singleAmt ? R.singleAmt.toLocaleString('ja-JP') : ''}" placeholder="0" aria-label="合計金額"></span></label>
         <div class="field"><span class="flabel">分類</span><select id="rSCat" aria-label="分類">${catOpts(R.singleCat)}</select>
           <div class="item-note" id="rSNote" style="margin-top:6px">${R.singleSug && R.singleCat ? '<span class="tag">候補</span>自動で付けた分類です' : ''}</div></div>
-        ${R.total ? `<p class="note" style="margin-left:0">レシートから読み取った合計：${yen(R.total)}</p>` : ''}`;
+        ${R.total ? `<p class="note" style="margin-left:0">レシートから読み取った合計：${yen(R.total)}${R.totalGuess ? '（推定です。レシート画像と見比べてください）' : ''}</p>` : ''}`;
     }
     refresh();
   }
@@ -1997,13 +2778,52 @@ function dropTx(id) {
   return null;
 }
 
+/* 現資産・エントリーの同期（1件ずつ、更新が新しい方を採用。削除は印で伝える） */
+const ITEM_KINDS = {
+  acct:  {list: () => S.accts,   set: v => { S.accts = v; },   stamp: o => o.m || o.u || 0, clean: (d, id, m) => cleanAcct({...d, id, m})},
+  entry: {list: () => S.entries, set: v => { S.entries = v; }, stamp: o => o.u || 0,        clean: (d, id, m) => cleanEntry({...d, id, u:m})},
+  trade: {list: () => S.trades,  set: v => { S.trades = v; },  stamp: o => o.u || 0,        clean: (d, id, m) => cleanTrade({...d, id, u:m})}
+};
+const itemStamp = (k, o) => ITEM_KINDS[k].stamp(o);
+function itemsToWire() {
+  const items = [];
+  for (const k of Object.keys(ITEM_KINDS)) for (const o of ITEM_KINDS[k].list()) items.push({k, id:o.id, m:itemStamp(k, o), x:0, d:o});
+  for (const id of Object.keys(S.idels)) items.push({k:S.idels[id].k, id, m:S.idels[id].t, x:1});
+  return items;
+}
+function mergeItems(res) {
+  let ch = 0;
+  if (!Array.isArray(res.items)) return -1;               // GAS が古い（現資産・エントリーに未対応）
+  for (const r of res.items) {
+    if (!r || !r.id || !ITEM_KINDS[r.k]) continue;
+    const K = ITEM_KINDS[r.k];
+    const local = K.list().find(x => x.id === r.id);
+    const lm = local ? K.stamp(local) : 0;
+    const m = Number(r.m) || 0;
+    if (r.x) {
+      if (local && m > lm) { K.set(K.list().filter(x => x.id !== r.id)); ch++; }
+      continue;
+    }
+    const tomb = S.idels[r.id];
+    if (tomb && tomb.t >= m) continue;                    // 端末で消した後に、古い内容が残っていた場合
+    if (local && lm >= m) continue;                       // 端末の方が新しい（または同じ）
+    const clean = K.clean(r.d, r.id, m);
+    if (!clean) continue;
+    K.set(local ? K.list().map(x => x.id === r.id ? clean : x) : [...K.list(), clean]);
+    delete S.idels[r.id];
+    ch++;
+  }
+  const names = (cur, add) => [...new Set([...cur, ...(Array.isArray(add) ? add.map(x => String(x).trim().slice(0, 20)).filter(Boolean) : [])])].slice(-40);
+  if (res.lists) { S.acctNames = names(S.acctNames, res.lists.acctNames); S.pointNames = names(S.pointNames, res.lists.pointNames); }
+  return ch;
+}
+
 function mergeFromSheet(res, wasEmpty) {
   const st = {add:0, upd:0, del:0, cats:0, pays:0};
   const created = {cats:0, pays:0};
   // 新しい端末（記録なし）は、シートの分類・支払方法をそのまま使う
   if (wasEmpty && res.settings && res.settings.cats.length) {
     S.cats = res.settings.cats.map(c => ({id:c.id || ('c' + uid()), name:c.name, type:c.type, color:c.color || '#8A8F98'}));
-    if (Array.isArray(res.settings.assets) && res.settings.assets.length) S.assets = res.settings.assets.map(cleanAsset).filter(Boolean);
     if (res.settings.pays.length) S.pays = res.settings.pays.map(p => ({id:p.id || ('p' + uid()), name:p.name, color:p.color || '#8A8F98'}));
   }
   const touched = new Set();
@@ -2019,7 +2839,7 @@ function mergeFromSheet(res, wasEmpty) {
     const t = r.t === 'i' ? 'i' : 'e';
     const tx = cleanTx({id:r.id, d:r.d, t, c:resolveCat(r.cn, r.c, t, created), a:r.a, p:resolvePay(r.pn, r.p, created), n:r.n, s:local ? local.s : Date.now(), u:r.u});
     if (!tx) continue;
-    if (local) { dropTx(r.id); touched.add(local.d.slice(0,7)); st.upd++; if (local.mf) tx.mf = local.mf; if (local.r) tx.r = local.r; } else st.add++;
+    if (local) { dropTx(r.id); touched.add(local.d.slice(0,7)); st.upd++; if (local.mf) tx.mf = local.mf; if (local.r) tx.r = local.r; if (local.rid) { tx.rid = local.rid; tx.rd = local.rd; if (local.rec) tx.rec = 1; } } else st.add++;
     putTx(tx); touched.add(tx.d.slice(0,7));
     delete S.dels[r.id];
   }
@@ -2034,21 +2854,26 @@ async function syncNow(opt = {}) {
   clearTimeout(syncTimer);
   if (!opt.silent) { syncNote = '同期中…'; if (ui.tab === 'set') renderSettings(); }
   const sent = Object.assign({}, S.dels);
+  const sentI = Object.assign({}, S.idels);
   try {
     const wasEmpty = realCount() === 0 && !S.sync.last;
     const tx = allTx().map(txToWire);
     for (const id of Object.keys(sent)) tx.push({id, d:'2000-01-01', t:'e', c:'', cn:'', a:1, p:'', pn:'', n:'', u:sent[id], x:1});
-    const res = await gasCall(S.sync.url, {key:S.sync.key, op:'sync', tx, settings: wasEmpty ? null : {cats:S.cats, pays:S.pays, assets:S.assets}});
+    const res = await gasCall(S.sync.url, {key:S.sync.key, op:'sync', tx, settings: wasEmpty ? null : {cats:S.cats, pays:S.pays}, items:itemsToWire(), lists:{acctNames:S.acctNames, pointNames:S.pointNames}});
     const {st, touched} = mergeFromSheet(res, wasEmpty);
+    const ich = mergeItems(res);
+    for (const id of Object.keys(sentI)) if (S.idels[id] && S.idels[id].t === sentI[id].t) delete S.idels[id];
     for (const id of Object.keys(sent)) if (S.dels[id] === sent[id]) delete S.dels[id];
     S.sync.last = Date.now();
     syncErr = '';
     const changed = st.add + st.upd + st.del + st.cats + st.pays;
     syncNote = changed ? `シートから 追加${st.add}・更新${st.upd}・削除${st.del} を反映しました` : '';
+    if (ich > 0) syncNote += `${syncNote ? '／' : ''}現資産・エントリー ${ich}件を反映しました`;
+    if (ich < 0 && (S.accts.length || S.entries.length)) syncNote = '現資産・エントリーを他の端末と同期するには、スプレッドシート側のスクリプトを最新の Code.gs に入れ替えて、デプロイし直してください。';
     if (changed) { await saveAll(); } else { await saveMeta(); }
     syncBusy = false;
     render();
-    if (!opt.silent) toast(changed ? syncNote : '同期しました（変更なし）');
+    if (!opt.silent) toast(changed || ich > 0 ? syncNote : '同期しました（変更なし）');
     return true;
   } catch (e) {
     syncErr = e.message || '同期できませんでした';
@@ -2093,7 +2918,7 @@ function openSyncSheet() {
   const no = sheet.querySelector('#yNo'); if (no) no.onclick = closeSheet;
   const off = sheet.querySelector('#yOff');
   if (off) off.onclick = () => {
-    S.sync = {url:'', key:'', auto:true, last:null}; S.dels = {}; syncErr = ''; syncNote = '';
+    S.sync = {url:'', key:'', auto:true, last:null}; S.dels = {}; S.idels = {}; syncErr = ''; syncNote = '';
     saveMeta(); closeSheet(); toast('連携を解除しました（シートのデータは残ります）'); render();
   };
   sheet.querySelector('#yOk').onclick = async () => {
@@ -2124,17 +2949,34 @@ document.addEventListener('click', e => {
     case 'goto': ui.month = el.dataset.m; render(); break;
     case 'tab': ui.tab = el.dataset.tab; render(); window.scrollTo(0, 0); break;
     case 'add': openTxSheet(null); break;
-    case 'add-asset': openAssetSheet(null); break;
-    case 'edit-asset': { const a = S.assets.find(a => a.id === el.dataset.id); if (a) openAssetSheet(a); break; }
     case 'edit': { const tx = findTx(el.dataset.id); if (tx) openTxSheet(tx); break; }
-    case 'filter': ui.filter = v; renderFilter(); renderList(); break;
+    case 'filter': ui.filter = v; renderFilter(); renderList(); renderSelBar(); break;
+    case 'selmode': ui.sel = ui.sel ? null : new Set(); render(); break;
+    case 'selrow': { const id = el.dataset.id; if (ui.sel.has(id)) ui.sel.delete(id); else ui.sel.add(id); renderList(); renderSelBar(); break; }
+    case 'selall': { const all = ui.shownIds || []; ui.sel = ui.sel.size === all.length ? new Set() : new Set(all); renderList(); renderSelBar(); break; }
+    case 'seldel': openSelDelete(); break;
     case 'atype': ui.aType = v; renderStats(); break;
     case 'aby': ui.aBy = v; renderStats(); break;
+    case 'srange': { const r = searchRange(v); ui.sFrom = r[0]; ui.sTo = r[1]; renderStats(); break; }
+    case 'scat': ui.sCat = v; renderStats(); break;
     case 'settype': ui.setType = v; renderSettings(); break;
     case 'editcat': { const c = S.cats.find(x => x.id === el.dataset.id); if (c) openNameSheet('cat', c); break; }
     case 'addcat': openNameSheet('cat', null, ui.setType); break;
     case 'editpay': { const p = S.pays.find(x => x.id === el.dataset.id); if (p) openNameSheet('pay', p); break; }
     case 'addpay': openNameSheet('pay', null); break;
+    case 'addacct': openAcctSheet(null, null, el.dataset.kind); break;
+    case 'acctgrp': ui.acctOpen[v] = ui.acctOpen[v] === false; renderAcct(); break;
+    case 'addentry': openEntrySheet(null); break;
+    case 'addtrade': openTradeSheet(null, el.dataset.kind); break;
+    case 'edittrade': { const t = S.trades.find(x => x.id === el.dataset.id); if (t) openTradeSheet(t); break; }
+    case 'toggletrade': toggleTrade(el.dataset.id); break;
+    case 'trade-refresh': refreshPrices(true); break;
+    case 'editentry': { const e = S.entries.find(x => x.id === el.dataset.id); if (e) openEntrySheet(e); break; }
+    case 'toggleentry': toggleEntry(el.dataset.id); break;
+    case 'acctowner': ui.acctOwner = v; renderAcct(); break;
+    case 'acct-refresh': refreshPrices(true); break;
+    case 'acctpreset': openAcctSheet(null, el.dataset.name); break;
+    case 'editacct': { const a = S.accts.find(x => x.id === el.dataset.id); if (a) openAcctSheet(a); break; }
     case 'receipt': openReceiptChoice(); break;
     case 'import-csv': $('#fileCsv').click(); break;
     case 'backup': exportBackup(); break;
@@ -2147,7 +2989,13 @@ document.addEventListener('click', e => {
     case 'dismiss-install': lsSet(LS_FLAG_INSTALL, '1'); render(); break;
   }
 });
-$('#q').addEventListener('input', e => { ui.q = e.target.value; renderList(); });
+document.addEventListener('change', e => {
+  const t = e.target;
+  if (t.id === 'sFrom') { ui.sFrom = t.value; renderStats(); }
+  else if (t.id === 'sTo') { ui.sTo = t.value; renderStats(); }
+  else if (t.id === 'sCat') { ui.sCat = t.value; renderStats(); }
+});
+$('#q').addEventListener('input', e => { ui.q = e.target.value; renderList(); renderSelBar(); });
 $('#fileReceipt').addEventListener('change', e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; handleReceiptFile(f); });
 $('#fileCsv').addEventListener('change', e => { const fs = Array.from(e.target.files || []); e.target.value = ''; handleCsvFiles(fs); });
 $('#fileBackup').addEventListener('change', e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; handleBackupFile(f); });
@@ -2176,7 +3024,9 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
 window.__kk = {get S() { return S; }, ui, store, syncNow, parseReceipt, parseMoneyCsv, render, preprocessImage, runOcr};
 
 render();
-initStore().then(() => { render(); if (syncOn() && S.sync.auto) setTimeout(() => syncNow({silent:true}), 1500); });
+initStore().then(() => { materializeRecurring(); render(); if (syncOn() && S.sync.auto) setTimeout(() => syncNow({silent:true}), 1500); });
+setInterval(() => { if (ui.tab === 'trade' && document.visibilityState === 'visible' && store.loaded && S.trades.length && $('#overlay').hidden) refreshPrices(false, TRADE_TTL); }, 15000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && store.loaded) { materializeRecurring(); updateEntryBadge(); if (ui.tab === 'entry') renderEntries(); } });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && store.loaded && syncOn() && S.sync.auto && (!S.sync.last || Date.now() - S.sync.last > 5 * 60 * 1000)) syncNow({silent:true});
 });

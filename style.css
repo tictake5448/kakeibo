@@ -139,6 +139,7 @@ textarea{min-height:160px;font-family:var(--font-num);font-size:13px;line-height
 /* 設定 */
 .note{font-size:13px;color:var(--muted);margin:8px 4px 0}
 .stack{display:grid;gap:10px}
+.otag{display:inline-block;padding:0 7px;margin-right:6px;border-radius:8px;font-size:11.5px;line-height:18px;background:var(--accent-soft);color:var(--accent);font-weight:600}
 .sub-title{font-size:13px;color:var(--muted);margin:0 0 6px;letter-spacing:.04em}
 .kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 14px;margin:0;font-size:14px}
 .kv dt{color:var(--muted)}
@@ -150,8 +151,8 @@ textarea{min-height:160px;font-family:var(--font-num);font-size:13px;line-height
 .fab{pointer-events:auto;display:flex;align-items:center;gap:6px;min-height:52px;padding:0 20px 0 16px;border-radius:26px;border:0;background:var(--accent);color:var(--accent-ink);font-weight:700;font-size:16px;cursor:pointer;box-shadow:var(--shadow)}
 .fab.alt{background:var(--surface);color:var(--ink);border:1px solid var(--line)}
 .tabbar{position:fixed;left:0;right:0;bottom:0;z-index:15;background:var(--surface);border-top:1px solid var(--line);padding:6px max(16px,env(safe-area-inset-right,0px)) calc(6px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px))}
-.tabin{max-width:560px;margin:0 auto;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px}
-.tab{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-height:52px;border:0;border-radius:12px;background:transparent;color:var(--muted);font-size:12px;cursor:pointer}
+.tabin{max-width:560px;margin:0 auto;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:2px}
+.tab{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-height:52px;border:0;border-radius:12px;background:transparent;color:var(--muted);font-size:11.5px;white-space:nowrap;cursor:pointer}
 .tab[aria-current="page"]{color:var(--accent);font-weight:700}
 
 /* シート */
@@ -229,8 +230,109 @@ textarea{min-height:160px;font-family:var(--font-num);font-size:13px;line-height
   .progress.indet i{animation:none;width:100%}
 }
 
-.hint{margin:8px 2px 0;font-size:13px;color:var(--muted)}
-.hint b{font-family:var(--font-num);font-variant-numeric:tabular-nums;color:var(--text)}
-.hint.low b.after{color:var(--danger,#D9534F)}
-.asset-total{display:flex;justify-content:space-between;align-items:baseline;padding:4px 2px 12px}
-.asset-total .big{font-family:var(--font-num);font-size:26px;font-weight:600;font-variant-numeric:tabular-nums}
+/* エントリー */
+.erow{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center;padding:4px 14px 4px 4px;border-top:1px solid var(--line);transition:opacity .15s}
+.erow:first-child{border-top:0}
+.echk{display:flex;align-items:center;justify-content:center;width:48px;height:48px;border:0;background:none;padding:0;cursor:pointer}
+.echk span{display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:8px;border:2px solid var(--muted);color:transparent}
+.echk[aria-pressed="true"] span{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.echk svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+.emain{display:block;min-width:0;padding:8px 0;margin:0;text-align:left;background:none;border:0;cursor:pointer;color:inherit;font:inherit}
+.emain .cat{display:block;font-weight:600;overflow-wrap:anywhere}
+.emain .sub{display:block;color:var(--muted);font-size:12.5px;overflow-wrap:anywhere}
+.emain .sub.late{color:var(--expense);font-weight:600}
+.ept{font-family:var(--font-num);font-weight:600;white-space:nowrap;color:var(--accent)}
+.tab{position:relative}
+.tbadge{position:absolute;top:4px;left:calc(50% + 6px);min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:#D93025;color:#fff;font-style:normal;font-size:11px;font-weight:700;line-height:17px;text-align:center;box-sizing:border-box}
+.erow:not(.done) .cat.alert::before{content:"";display:inline-block;width:9px;height:9px;margin-right:6px;border-radius:50%;background:#D93025;vertical-align:1px}
+
+/* エントリー（表形式・横スクロール） */
+.esum{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 12px;padding:6px 4px 10px;font-size:13px;color:var(--muted)}
+.esum b{color:var(--ink);font-weight:700}
+.escroll{overflow-x:auto;-webkit-overflow-scrolling:touch;background:var(--surface);border:1px solid var(--line);border-radius:14px}
+.etable{min-width:max-content}
+.etr{display:grid;grid-template-columns:52px 84px 84px 190px 260px 124px 84px;align-items:center;border-top:1px solid var(--line);cursor:pointer}
+.etr.ehead{cursor:default;border-top:0;position:sticky;top:0;color:var(--muted);font-size:12px;font-weight:700;background:var(--bg)}
+.etr .ec{padding:10px 8px;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.etr .c-chk{position:sticky;left:0;z-index:1;background:var(--surface);padding:0;display:flex;justify-content:center}
+.etr.ehead .c-chk{background:var(--bg)}
+.etr .c-pt{text-align:right;font-family:var(--font-num);font-weight:600;color:var(--accent)}
+.etr.ehead .c-pt{font-family:inherit;color:var(--muted)}
+.etr .c-memo,.etr .c-done{color:var(--muted)}
+.etr .hit{color:var(--expense);font-weight:700}
+.etr .elink{display:block;max-width:100%;padding:0;margin:0;border:0;background:none;color:inherit;font:inherit;font-weight:600;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.etr .c-title.alert::before{content:"";display:inline-block;width:9px;height:9px;margin-right:6px;border-radius:50%;background:#D93025;vertical-align:1px}
+.etr .c-title{display:flex;align-items:center}
+.etr.done .ec:not(.c-chk){opacity:.45}
+.etr.done .c-chk .echk{opacity:.6}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+
+/* 分析：期間・カテゴリ集計 */
+.srow{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+.srow label{display:block;min-width:0}
+.srow input{width:100%}
+button.rank.sbtn{display:block;width:100%;text-align:left;background:none;border:0;border-radius:8px;color:inherit;font:inherit;cursor:pointer}
+button.rank.sbtn+button.rank.sbtn{border-top:1px solid var(--line)}
+
+/* 現資産：大カテゴリ */
+.acg{margin-top:16px}
+.acghead{display:flex;align-items:center;gap:8px;padding:0 0 6px 4px}
+.acgtoggle{display:flex;align-items:center;gap:6px;flex:1;min-width:0;min-height:40px;padding:0;margin:0;background:none;border:0;color:var(--ink);font:inherit;cursor:pointer;text-align:left}
+.acgtoggle .chev{width:18px;height:18px;color:var(--muted);transition:transform .15s;transform:rotate(90deg);flex:none}
+.acgtoggle[aria-expanded="false"] .chev{transform:none}
+.acgname{font-family:var(--font-display);font-size:17px;font-weight:700}
+.acgcnt{color:var(--muted);font-size:12.5px}
+.acgsum{display:flex;align-items:baseline;gap:6px;white-space:nowrap}
+.acgsum b{font-weight:700}
+.acgsum small{color:var(--muted);font-size:12px}
+.acg-empty{padding:14px 8px;background:var(--surface);border:1px solid var(--line);border-radius:14px}
+
+/* 家計簿：選択して削除 */
+.searchrow{display:flex;gap:8px;align-items:center}
+.searchrow input{flex:1;min-width:0}
+.searchrow .chip{flex:none;min-height:44px}
+.selbar{position:fixed;left:0;right:0;bottom:calc(76px + env(safe-area-inset-bottom,0px));z-index:16;padding:0 max(16px,env(safe-area-inset-right,0px)) 0 max(16px,env(safe-area-inset-left,0px));pointer-events:none}
+.selin{pointer-events:auto;max-width:560px;margin:0 auto;display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow)}
+.selin .btn.small{min-height:40px;padding:0 12px;font-size:14px;white-space:nowrap}
+.selcnt{flex:1;text-align:center;font-size:13px;color:var(--muted);white-space:nowrap}
+.selcnt b{color:var(--ink);font-size:17px}
+.row.selrow .selbox{display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:7px;border:2px solid var(--muted);color:transparent;flex:none}
+.row.selrow .selbox svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+.row.selrow[aria-pressed="true"] .selbox{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.row.selrow[aria-pressed="true"]{background:var(--accent-soft)}
+
+/* トレード */
+.etr.ttr{grid-template-columns:44px 74px 66px 96px 82px 112px 82px 120px}
+.etr.ttr .ec{padding:10px 6px;font-size:13.5px}
+.etr.ttr .c-run{position:sticky;left:44px;z-index:1;background:var(--surface);padding-left:2px}
+.etr.ttr.ehead .c-run{background:var(--bg)}
+.etr.ttr .elink{font-weight:600}
+.nowtag{display:inline-block;margin-right:4px;padding:0 5px;border-radius:6px;background:var(--accent-soft);color:var(--accent);font-size:10.5px;font-weight:700;line-height:16px;vertical-align:1px}
+.etr .live{color:var(--accent)}
+.etr .c-num{text-align:right;font-family:var(--font-num)}
+.etr.ehead .c-num{font-family:inherit}
+.etr .c-diff{font-weight:700}
+.etr .c-diff.plus,.esum b.plus{color:var(--income)}
+.etr .c-diff.minus,.esum b.minus{color:var(--expense)}
+/* 家計簿の設定ボタン（右上） */
+.homehead{position:relative}
+.gear{position:absolute;top:12px;right:12px;z-index:2;width:40px;height:40px;background:var(--bg);box-shadow:none}
+.gear svg{width:21px;height:21px}
+
+/* 日付の入力欄が画面からはみ出さないようにする（iPhone） */
+input[type=date]{-webkit-appearance:none;appearance:none;text-align:left}
+input[type=date]::-webkit-date-and-time-value{text-align:left;min-width:0}
+input[type=date]::-webkit-datetime-edit{padding:0}
+/* トレード：差額は右端に固定して、横にスクロールしても見えるようにする */
+.etr.ttr .c-diff{position:sticky;right:0;z-index:1;background:var(--surface);box-shadow:-8px 0 8px -8px rgba(0,0,0,.25)}
+.etr.ttr.ehead .c-diff{background:var(--bg)}
+.etr.ttr.done .ec:not(.c-chk){opacity:1;color:var(--muted)}
+.etr.ttr.done .c-diff.plus,.etr.ttr.done .c-diff.minus{color:var(--muted)}
+.etr.ttr.done .echk{opacity:.7}
+
+/* トレード：株の表 */
+.etr.ttr.stk{grid-template-columns:44px 104px 74px 66px 92px 64px 92px 64px 112px}
+.etr.ttr.stk .c-title{position:sticky;left:44px;z-index:1;background:var(--surface);padding-left:2px}
+.etr.ttr.stk.ehead .c-title{background:var(--bg)}
+.etr.ttr.stk .c-run{position:static;background:none;padding-left:6px}
+.tgh{margin-top:6px}
