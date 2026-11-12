@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.17.0';
+const APP_VERSION = '1.18.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -36,7 +36,7 @@ const lsSet = (k,v) => { try { localStorage.setItem(k,v); } catch (e) {} };
 const cashflow = x => x.t === 'i' ? x.a : -x.a;   // 収入は+、支出は−（返金・値引きの負の支出は+になる）
 
 /* ===== 状態 ===== */
-let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], pointNames: [], entries: [], trades: [], idels: {}, prices: {}, recSkips: {}, months: {}, lastBackup: null, seeded: {furusato:1}, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
+let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], cards: [], acctNames: [], pointNames: [], entries: [], trades: [], idels: {}, prices: {}, recSkips: {}, months: {}, lastBackup: null, seeded: {furusato:1}, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
 const store = { mode: 'init', persisted: null, error: false, loaded: false };
 const ui = { acctOpen:{}, sel:null, sCat:'all', acctOwner:'all', tab:'home', month:curMonth(), filter:'all', q:'', aType:'e', aBy:'cat', setType:'e', lastPay:'cash', lastType:'e' };
 
@@ -100,7 +100,7 @@ async function idbLoadAll() {
   });
   return {months, meta};
 }
-const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, trades:S.trades, idels:S.idels, prices:S.prices, recSkips:S.recSkips, lastBackup:S.lastBackup, seeded:S.seeded, dels:S.dels, sync:S.sync});
+const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, cards:S.cards, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, trades:S.trades, idels:S.idels, prices:S.prices, recSkips:S.recSkips, lastBackup:S.lastBackup, seeded:S.seeded, dels:S.dels, sync:S.sync});
 /* エントリー: {id, run(実行日), due(期限), title(内容), memo(詳細), pt(付与pt), done(達成日。空なら未達成), u} */
 function cleanEntry(e) {
   if (!e || typeof e !== 'object') return null;
@@ -189,6 +189,7 @@ function applyLoaded(months, meta) {
     if (meta.idels && typeof meta.idels === 'object' && !Array.isArray(meta.idels)) { S.idels = {}; for (const k of Object.keys(meta.idels).slice(0, 2000)) { const v = meta.idels[k]; if (v && ITEM_KINDS[v.k] && Number(v.t)) S.idels[k] = {k: v.k, t: Number(v.t)}; } }
     if (Array.isArray(meta.trades)) S.trades = meta.trades.map(cleanTrade).filter(Boolean).slice(0, 5000);
     if (Array.isArray(meta.entries)) S.entries = meta.entries.map(cleanEntry).filter(Boolean).slice(0, 2000);
+    if (Array.isArray(meta.cards)) S.cards = meta.cards.map(cleanCard).filter(Boolean).slice(0, 60);
     if (Array.isArray(meta.pointNames)) S.pointNames = meta.pointNames.map(x => String(x).trim().slice(0, 20)).filter(Boolean).slice(0, 40);
     if (Array.isArray(meta.acctNames)) S.acctNames = meta.acctNames.map(x => String(x).trim().slice(0, 20)).filter(Boolean).slice(0, 40);
     if (meta.prices && typeof meta.prices === 'object') {
@@ -1285,7 +1286,8 @@ function renderAcct() {
         <p>預貯金、株、暗号資産（ビットコイン・イーサリアム）、ポイントを、夫・妻の持ち主ごとに登録すると、どこにいくらあるかを一覧で見られます。収入・支出の記録とは別に保存されます。</p>
         <div class="chips">${ACCT_PRESETS.slice(0, 5).map(n => `<button type="button" class="chip" data-act="acctpreset" data-name="${esc(n)}">${esc(n)}</button>`).join('')}</div>
         <button type="button" class="btn primary" data-act="addacct">資産を追加する</button>
-      </div>`;
+      </div>
+      ${cardsHtml('all')}`;
     return;
   }
   if (ui.acctOwner !== 'all' && !S.accts.some(a => a.owner === ui.acctOwner)) ui.acctOwner = 'all';
@@ -1338,7 +1340,130 @@ function renderAcct() {
       ${priceBox}
     </div>
     ${groups}
+    ${cardsHtml(f)}
     <p class="note">資産の追加は、右上の「＋」から行います。残高や数量が変わったら、その資産をタップして更新してください。株式の株価は手入力です。ビットコイン・イーサリアムの価格は自動で取得します（円換算）。ポイントは1ポイント＝1円として合計に含めます。ここの金額は収入・支出の記録には影響しません。</p>`;
+}
+
+/* ===== クレジットカード（名称・有効期限・年会費・毎月の支払いタイミング）。カード番号は扱いません。この端末だけに保存 ===== */
+const cleanCard = c => {
+  if (!c || typeof c.id !== 'string' || typeof c.name !== 'string' || !c.name.trim()) return null;
+  const day = v => { const n = Math.round(Number(v)); return n >= 0 && n <= 31 ? n : 0; };       // 0＝月末
+  return {id:c.id, name:c.name.trim().slice(0, 30), owner:['h','w','j'].includes(c.owner) ? c.owner : 'h',
+    exp:/^\d{4}-\d{2}$/.test(String(c.exp)) ? c.exp : '', fee:c.fee ? 1 : 0, feeAmt:Math.max(0, Math.round(Number(c.feeAmt)) || 0),
+    close:day(c.close), payMonth:[0, 1, 2].includes(Number(c.payMonth)) ? Number(c.payMonth) : 1, payDay:day(c.payDay),
+    note:String(c.note || '').slice(0, 30), u:Number(c.u) || 0};
+};
+const dayLabel = n => n === 0 ? '月末' : n + '日';
+const monthLabel = n => ['当月', '翌月', '翌々月'][n] || '翌月';
+const cardTiming = c => `${dayLabel(c.close)}締め ${monthLabel(c.payMonth)}${dayLabel(c.payDay)}払い`;
+/* 次の支払日（今日以降で一番近い日）。月末は各月の最終日に読み替える */
+function nextPayDate(c, now = new Date()) {
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  for (let i = -3; i <= 4; i++) {
+    const base = new Date(today.getFullYear(), today.getMonth() + i + c.payMonth, 1);
+    const last = new Date(base.getFullYear(), base.getMonth() + 1, 0).getDate();
+    const dt = new Date(base.getFullYear(), base.getMonth(), c.payDay === 0 ? last : Math.min(c.payDay, last));
+    if (dt >= today) return dt;
+  }
+  return null;
+}
+function cardExpiry(c, now = new Date()) {                 // 有効期限は、その月の末日まで使える
+  if (!c.exp) return {text:'有効期限 未入力', cls:''};
+  const [y, m] = c.exp.split('-').map(Number);
+  const end = new Date(y, m, 0), today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const days = Math.round((end - today) / 86400000);
+  const label = `${y}/${pad(m)}`;
+  if (days < 0) return {text:`有効期限 ${label}（期限切れ）`, cls:'bad'};
+  if (days <= 60) return {text:`有効期限 ${label}（あと${days}日）`, cls:'warn'};
+  return {text:`有効期限 ${label}`, cls:''};
+}
+function cardsHtml(f) {
+  const list = S.cards.filter(c => f === 'all' || c.owner === f).sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+  const rows = list.map(c => {
+    const ex = cardExpiry(c), np = nextPayDate(c);
+    const fee = c.fee ? `年会費 あり${c.feeAmt ? '（' + yen(c.feeAmt) + '）' : ''}` : '年会費 無料';
+    return `<button type="button" class="row" data-act="editcard" data-id="${esc(c.id)}">
+      <i class="dot" style="background:var(--accent)"></i>
+      <span class="main"><span class="cat">${esc(c.name)}</span><span class="sub" style="white-space:normal"><span class="otag">${OWNERS[c.owner]}</span><span class="${ex.cls ? 'cx-' + ex.cls : ''}">${esc(ex.text)}</span> ・ ${esc(fee)}<br>${esc(cardTiming(c))}${c.note ? ' ・ ' + esc(c.note) : ''}</span></span>
+      <span class="amt" style="font-size:14px">${np ? (np.getMonth() + 1) + '/' + np.getDate() : '—'}<small style="display:block;text-align:right;color:var(--muted);font-size:12px">次の支払日</small></span>
+    </button>`;
+  }).join('');
+  return `<div class="acg">
+      <div class="acghead">
+        <span class="acgtoggle" style="cursor:default"><span class="acgname">クレジットカード</span></span>
+        <span class="acgsum"><small>${list.length}枚</small></span>
+        <button type="button" class="icon-btn sm" data-act="addcard" aria-label="クレジットカードを追加"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+      </div>
+      ${list.length ? `<div class="rows">${rows}</div>` : '<div class="empty acg-empty">登録なし（右の「＋」で追加）</div>'}
+    </div>`;
+}
+function openCardSheet(item) {
+  const isNew = !item;
+  const d = item ? {...item} : {id:'cd' + uid(), name:'', owner:'h', exp:'', fee:0, feeAmt:0, close:15, payMonth:1, payDay:10, note:'', u:0};
+  let confirming = false;
+  const opts = (sel, withEnd) => (withEnd ? [`<option value="0"${sel === 0 ? ' selected' : ''}>月末</option>`] : []).concat(Array.from({length:31}, (_, i) => `<option value="${i + 1}"${sel === i + 1 ? ' selected' : ''}>${i + 1}日</option>`)).join('');
+  const sheet = openSheet(`
+    <div class="sheet-head"><h2>クレジットカードを${isNew ? '追加' : '編集'}</h2>${closeBtn('cX')}</div>
+    <label class="field"><span class="flabel">カードの名称</span><input id="cName" type="text" maxlength="30" autocomplete="off" placeholder="例：楽天カード"></label>
+    <div class="field"><span class="flabel">持ち主（夫・妻）</span><div class="chips" id="cOwners"></div></div>
+    <label class="field"><span class="flabel">有効期限（年・月）</span><input id="cExp" type="month" min="2000-01" max="2099-12"></label>
+    <div class="field"><span class="flabel">年会費</span><div class="chips" id="cFee"></div>
+      <div id="cFeeBox" style="margin-top:8px" hidden><span class="amount"><b>¥</b><input id="cFeeAmt" type="text" inputmode="numeric" autocomplete="off" placeholder="金額（任意）" aria-label="年会費の金額"></span></div></div>
+    <div class="field"><span class="flabel">毎月の支払いタイミング</span>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:center">
+        <label><span class="flabel" style="font-size:12px">締め日</span><select id="cClose">${opts(d.close, true)}</select></label>
+        <label><span class="flabel" style="font-size:12px">支払月</span><select id="cPM"><option value="0">当月</option><option value="1">翌月</option><option value="2">翌々月</option></select></label>
+        <label style="grid-column:1 / -1"><span class="flabel" style="font-size:12px">支払日</span><select id="cPD">${opts(d.payDay, true)}</select></label>
+      </div><p class="note" id="cPrev" style="margin:8px 2px 0;font-weight:600"></p></div>
+    <label class="field"><span class="flabel">メモ（任意）</span><input id="cNote" type="text" maxlength="30" autocomplete="off" placeholder="例：メイン、ETC用"></label>
+    <div class="sheet-foot"><p class="err" id="cErr" role="alert" style="min-height:0;margin:0 0 6px"></p><div id="cActions"></div></div>`, `クレジットカードを${isNew ? '追加' : '編集'}`);
+  const $c = id => sheet.querySelector(id);
+  $c('#cName').value = d.name; $c('#cExp').value = d.exp; $c('#cNote').value = d.note;
+  $c('#cPM').value = String(d.payMonth); $c('#cFeeAmt').value = d.feeAmt ? String(d.feeAmt) : '';
+  const setErr = m => { $c('#cErr').textContent = m || ''; };
+  const chip = (attr, v, label, on) => `<button type="button" class="chip small" ${attr}="${v}" aria-pressed="${on}">${label}</button>`;
+  const paintChips = () => {
+    $c('#cOwners').innerHTML = ['h', 'w', 'j'].map(o => chip('data-o', o, OWNERS[o], d.owner === o)).join('');
+    $c('#cFee').innerHTML = chip('data-fee', 0, '無料', !d.fee) + chip('data-fee', 1, 'あり', !!d.fee);
+    $c('#cFeeBox').hidden = !d.fee;
+  };
+  const paintPrev = () => {
+    const t = {...d, close:Number($c('#cClose').value), payMonth:Number($c('#cPM').value), payDay:Number($c('#cPD').value)};
+    const np = nextPayDate(t);
+    $c('#cPrev').textContent = `${cardTiming(t)}${np ? `（次回：${np.getMonth() + 1}月${np.getDate()}日）` : ''}`;
+  };
+  const paintActions = () => {
+    const box = $c('#cActions');
+    if (confirming) {
+      box.innerHTML = `<div class="confirm"><p><b>「${esc(d.name)}」を削除しますか？</b></p><div class="actions"><button type="button" class="btn" id="cNo">やめる</button><button type="button" class="btn danger solid primary" id="cYes">削除する</button></div></div>`;
+      box.querySelector('#cNo').onclick = () => { confirming = false; paintActions(); };
+      box.querySelector('#cYes').onclick = () => { S.cards = S.cards.filter(c => c.id !== d.id); saveMeta(); closeSheet(); toast('削除しました'); render(); };
+    } else {
+      box.innerHTML = `<div class="actions">${isNew ? '' : '<button type="button" class="btn danger" id="cDel">削除</button>'}<button type="button" class="btn primary" id="cSave">保存</button></div>`;
+      const del = box.querySelector('#cDel');
+      if (del) del.onclick = () => { confirming = true; paintActions(); };
+      box.querySelector('#cSave').onclick = () => {
+        const name = $c('#cName').value.trim();
+        if (!name) { setErr('カードの名称を入力してください。'); $c('#cName').focus(); return; }
+        const out = cleanCard({...d, name, exp:$c('#cExp').value, feeAmt:d.fee ? Number(normDigits($c('#cFeeAmt').value).replace(/\D/g, '')) : 0,
+          close:Number($c('#cClose').value), payMonth:Number($c('#cPM').value), payDay:Number($c('#cPD').value), note:$c('#cNote').value.trim(), u:Date.now()});
+        if (!out) { setErr('入力内容を確認してください。'); return; }
+        S.cards = isNew ? [...S.cards, out] : S.cards.map(c => c.id === out.id ? out : c);
+        saveMeta(); closeSheet(); toast('保存しました'); render();
+      };
+    }
+  };
+  $c('#cClose').onchange = $c('#cPM').onchange = $c('#cPD').onchange = paintPrev;
+  $c('#cClose').value = String(d.close); $c('#cPD').value = String(d.payDay);
+  sheet.onclick = e => {
+    const t = e.target;
+    if (t.closest('#cClose') || t.closest('#cPM') || t.closest('#cPD')) return;
+    const ob = t.closest('#cOwners button[data-o]'); if (ob) { d.owner = ob.dataset.o; paintChips(); return; }
+    const fb = t.closest('#cFee button[data-fee]'); if (fb) { d.fee = Number(fb.dataset.fee); paintChips(); return; }
+  };
+  $c('#cName').addEventListener('input', () => setErr(''));
+  $c('#cX').onclick = closeSheet;
+  paintChips(); paintPrev(); paintActions();
 }
 
 function openAcctSheet(item, preset, initKind) {
@@ -2002,7 +2127,7 @@ async function exportCsv(scope) {
 /* ===== バックアップ ===== */
 async function exportBackup() {
   if (!realCount() && !Object.keys(S.learn).length && !S.accts.length && !S.entries.length && !S.trades.length) { toast('バックアップする記録がありません'); return; }
-  const data = {app:'kakeibo', version:1, exportedAt:new Date().toISOString(), cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, trades:S.trades, months:S.months};
+  const data = {app:'kakeibo', version:1, exportedAt:new Date().toISOString(), cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, cards:S.cards, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, trades:S.trades, months:S.months};
   const d = todayStr().replace(/-/g, '');
   const r = await deliverFile(JSON.stringify(data), `kakeibo-backup-${d}.json`, 'application/json');
   if (r === 'shared' || r === 'downloaded') {
@@ -2033,7 +2158,7 @@ async function handleBackupFile(file) {
     <div class="sheet-foot"><div class="actions"><button type="button" class="btn" id="bNo">やめる</button><button type="button" class="btn danger solid primary" id="bYes">置き換えて復元</button></div></div>`, 'バックアップから復元');
   sheet.querySelector('#bClose').onclick = sheet.querySelector('#bNo').onclick = closeSheet;
   sheet.querySelector('#bYes').onclick = () => {
-    applyLoaded(months, {cats:obj.cats, pays:obj.pays, learn:obj.learn, accts:obj.accts, acctNames:obj.acctNames, pointNames:obj.pointNames, entries:obj.entries, trades:obj.trades, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+    applyLoaded(months, {cats:obj.cats, pays:obj.pays, learn:obj.learn, accts:obj.accts, cards:obj.cards, acctNames:obj.acctNames, pointNames:obj.pointNames, entries:obj.entries, trades:obj.trades, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
     saveAll();
     closeSheet(); toast(`${n.toLocaleString('ja-JP')}件を復元しました`); render();
   };
@@ -3032,6 +3157,8 @@ document.addEventListener('click', e => {
     case 'editpay': { const p = S.pays.find(x => x.id === el.dataset.id); if (p) openNameSheet('pay', p); break; }
     case 'addpay': openNameSheet('pay', null); break;
     case 'addacct': openAcctSheet(null, null, el.dataset.kind); break;
+    case 'addcard': openCardSheet(null); break;
+    case 'editcard': { const c = S.cards.find(x => x.id === el.dataset.id); if (c) openCardSheet(c); break; }
     case 'acctgrp': ui.acctOpen[v] = ui.acctOpen[v] === false; renderAcct(); break;
     case 'addentry': openEntrySheet(null); break;
     case 'addtrade': openTradeSheet(null, el.dataset.kind); break;
