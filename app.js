@@ -1,13 +1,13 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.16.0';
+const APP_VERSION = '1.17.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
   ['utility','水道・光熱費','e',5],['phone','通信費','e',8],['fun','趣味・娯楽','e',9],['beauty','衣服・美容','e',0],
   ['health','健康・医療','e',4],['edu','教育・教養','e',3],['social','交際費','e',11],['insure','保険','e',10],
-  ['tax','税金・社会保障','e',10],['other_e','その他支出','e',10],
+  ['tax','税金・社会保障','e',10],['furusato','ふるさと納税','e',3],['other_e','その他支出','e',10],
   ['salary','給与','i',4],['bonus','賞与','i',3],['side','副業','i',6],['other_i','その他収入','i',10]
 ].map(([id,name,type,c]) => ({id,name,type,color:PAL[c]}));
 const DEFAULT_PAYS = [
@@ -36,10 +36,11 @@ const lsSet = (k,v) => { try { localStorage.setItem(k,v); } catch (e) {} };
 const cashflow = x => x.t === 'i' ? x.a : -x.a;   // 収入は+、支出は−（返金・値引きの負の支出は+になる）
 
 /* ===== 状態 ===== */
-let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], pointNames: [], entries: [], trades: [], idels: {}, prices: {}, recSkips: {}, months: {}, lastBackup: null, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
+let S = { cats: DEFAULT_CATS.map(c => ({...c})), pays: DEFAULT_PAYS.map(p => ({...p})), learn: {}, accts: [], acctNames: [], pointNames: [], entries: [], trades: [], idels: {}, prices: {}, recSkips: {}, months: {}, lastBackup: null, seeded: {furusato:1}, dels: {}, sync: {url:'', key:'', auto:true, last:null} };
 const store = { mode: 'init', persisted: null, error: false, loaded: false };
 const ui = { acctOpen:{}, sel:null, sCat:'all', acctOwner:'all', tab:'home', month:curMonth(), filter:'all', q:'', aType:'e', aBy:'cat', setType:'e', lastPay:'cash', lastType:'e' };
 
+const isFuru = c => !!c && (c.id === 'furusato' || c.name === 'ふるさと納税');
 const catById = id => S.cats.find(c => c.id === id) || {id, name:'未分類', color:'#8A8F98', type:'e'};
 const payById = id => S.pays.find(p => p.id === id) || {id, name:'その他', color:'#8A8F98'};
 const payName = id => payById(id).name;
@@ -99,7 +100,7 @@ async function idbLoadAll() {
   });
   return {months, meta};
 }
-const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, trades:S.trades, idels:S.idels, prices:S.prices, recSkips:S.recSkips, lastBackup:S.lastBackup, dels:S.dels, sync:S.sync});
+const metaDoc = () => ({cats:S.cats, pays:S.pays, learn:S.learn, accts:S.accts, acctNames:S.acctNames, pointNames:S.pointNames, entries:S.entries, trades:S.trades, idels:S.idels, prices:S.prices, recSkips:S.recSkips, lastBackup:S.lastBackup, seeded:S.seeded, dels:S.dels, sync:S.sync});
 /* エントリー: {id, run(実行日), due(期限), title(内容), memo(詳細), pt(付与pt), done(達成日。空なら未達成), u} */
 function cleanEntry(e) {
   if (!e || typeof e !== 'object') return null;
@@ -162,6 +163,7 @@ function cleanTx(x) {
   if (!Number.isFinite(a) || a === 0 || !/^\d{4}-\d{2}-\d{2}$/.test(String(x.d))) return null;
   const out = {id: String(x.id || uid()), d: String(x.d), t: x.t === 'i' ? 'i' : 'e', c: String(x.c || ''), a: Math.round(a), p: String(x.p || ''), n: String(x.n || '').slice(0, 120), s: Number(x.s) || 0, u: Number(x.u) || 0};
   if (x.mf) out.mf = String(x.mf);
+  if (x.f) out.f = String(x.f).slice(0, 40);                // ふるさと納税の寄付先（何県何市）
   if (x.r) out.r = String(x.r);
   if (x.rid) { out.rid = String(x.rid); out.rd = Math.min(31, Math.max(1, Number(x.rd) || Number(out.d.slice(8)))); }   // 毎月の支払いの系列（rid）と支払日（rd）
   if (x.rid && x.rec) out.rec = 1;                                                                                    // 「毎月」のチェック
@@ -194,6 +196,14 @@ function applyLoaded(months, meta) {
       for (const k of Object.keys(COINS)) { const q = meta.prices[k]; if (q && Number(q.p) > 0) S.prices[k] = {p: Number(q.p), t: Number(q.t) || 0, manual: !!q.manual}; }
     }
     if (meta.sync && typeof meta.sync === 'object') S.sync = {url:String(meta.sync.url || ''), key:String(meta.sync.key || ''), auto:meta.sync.auto !== false, last:Number(meta.sync.last) || null};
+    S.seeded = (meta.seeded && typeof meta.seeded === 'object') ? {...meta.seeded} : {};
+    if (!S.seeded.furusato) {                       // 「ふるさと納税」カテゴリを1度だけ追加（消したあとは戻さない）
+      S.seeded.furusato = 1;
+      if (!S.cats.some(c => c.id === 'furusato' || c.name === 'ふるさと納税')) {
+        const i = S.cats.findIndex(c => c.id === 'tax');
+        S.cats.splice(i >= 0 ? i + 1 : S.cats.length, 0, {id:'furusato', name:'ふるさと納税', type:'e', color:PAL[3]});
+      }
+    }
   }
 }
 function saveLs() {
@@ -997,7 +1007,7 @@ function renderList() {
     const sum = [inc ? `収入 ${yen(inc)}` : '', ex ? `支出 ${yen(ex)}` : ''].filter(Boolean).join('　');
     const rows = g.items.map(x => {
       const c = catById(x.c);
-      const sub = [x.n, payName(x.p)].filter(Boolean).join(' · ');
+      const sub = [x.f, x.n, payName(x.p)].filter(Boolean).join(' · ');
       const cf = cashflow(x);
       const on = ui.sel && ui.sel.has(x.id);
       return `<button type="button" class="row${ui.sel ? ' selrow' : ''}" data-act="${ui.sel ? 'selrow' : 'edit'}" data-id="${esc(x.id)}"${ui.sel ? ` aria-pressed="${!!on}"` : ''}>
@@ -1011,15 +1021,18 @@ function renderList() {
 }
 
 function breakdown(key, type, by) {
-  const map = {};
+  const map = {}, dest = {};
   for (const x of monthTx(key)) {
     if (x.t !== type) continue;
     const k = by === 'cat' ? x.c : x.p;
     map[k] = (map[k] || 0) + x.a;
+    if (by === 'cat' && isFuru(catById(x.c))) { const f = x.f || '寄付先未入力'; (dest[f] = dest[f] || 0); dest[f] += x.a; }
   }
   return Object.entries(map).map(([id,v]) => {
     const o = by === 'cat' ? catById(id) : payById(id);
-    return {name:o.name, color:o.color, v};
+    const r = {name:o.name, color:o.color, v};
+    if (by === 'cat' && isFuru(o)) r.dest = Object.entries(dest).sort((a, b) => b[1] - a[1]);   // 寄付先（県・市）ごとの金額
+    return r;
   }).sort((a,b) => b.v - a.v);
 }
 
@@ -1087,7 +1100,7 @@ function renderStats() {
   const word = ui.aType === 'e' ? '支出' : '収入';
   const rankHtml = rows.length ? rows.map(r => {
     const pct = total > 0 ? r.v / total * 100 : 0;
-    return `<div class="rank"><div class="rtop"><span class="rname"><i class="dot" style="background:${r.color}"></i>${esc(r.name)}</span><span class="rval"><span class="amt">${r.v < 0 ? '−' : ''}${yen(r.v)}</span><span class="pct">${pct < 1 && pct > 0 ? '<1' : Math.round(Math.max(0, pct))}%</span></span></div><div class="rbar"><i style="width:${max ? Math.max(0, r.v) / max * 100 : 0}%;background:${r.color}"></i></div></div>`;
+    return `<div class="rank"><div class="rtop"><span class="rname"><i class="dot" style="background:${r.color}"></i>${esc(r.name)}</span><span class="rval"><span class="amt">${r.v < 0 ? '−' : ''}${yen(r.v)}</span><span class="pct">${pct < 1 && pct > 0 ? '<1' : Math.round(Math.max(0, pct))}%</span></span></div><div class="rbar"><i style="width:${max ? Math.max(0, r.v) / max * 100 : 0}%;background:${r.color}"></i></div>${r.dest ? `<ul class="dests">${r.dest.map(([n, v]) => `<li><span>${esc(n)}</span><span class="num">${yen(v)}</span></li>`).join('')}</ul>` : ''}</div>`;
   }).join('') : `<div class="empty">この月の${word}はまだありません。</div>`;
 
   const keys = [5,4,3,2,1,0].map(i => shiftMonth(ui.month, -i));
@@ -1753,7 +1766,8 @@ function openTxSheet(orig) {
     <div class="field"><span class="flabel">カテゴリ</span><div class="chips" id="fCats"></div></div>
     <label class="field"><span class="flabel">日付</span><input id="fDate" type="date"></label>
     <div class="field"><span class="flabel">支払方法</span><div class="chips" id="fPays"></div><p class="hint" id="fHint" hidden></p></div>
-    <label class="field"><span class="flabel">メモ</span><input id="fMemo" type="text" maxlength="80" placeholder="例：スーパー" autocomplete="off"></label>
+    <label class="field"><span class="flabel">メモ</span><textarea id="fMemo" class="memo" rows="1" maxlength="120" placeholder="例：スーパー" autocomplete="off"></textarea></label>
+    <label class="field" id="fDestBox" hidden><span class="flabel">寄付先（何県何市まで）</span><input id="fDest" type="text" maxlength="40" placeholder="例：北海道 夕張市" autocomplete="off"></label>
     <div id="fRecBox"></div>
     <p class="err" id="fErr" role="alert"></p>
     <div class="sheet-foot" id="fActions"></div>`, orig ? '記録を編集' : '記録を入力');
@@ -1762,6 +1776,13 @@ function openTxSheet(orig) {
   fAmt.value = d.a ? d.a.toLocaleString('ja-JP') : '';
   fDate.value = d.d;
   fMemo.value = d.n || '';
+  const fDest = sheet.querySelector('#fDest'); fDest.value = d.f || '';
+  const furuOn = () => d.t === 'e' && isFuru(catById(d.c));
+  const paintFuru = () => {                              // ふるさと納税：メモ欄を3倍の高さにし、寄付先の欄を出す
+    const on = furuOn();
+    fMemo.classList.toggle('tall', on); fMemo.rows = on ? 3 : 1;
+    sheet.querySelector('#fDestBox').hidden = !on;
+  };
   const err = msg => { fErr.textContent = msg; };
   const paintHead = () => {
     sheet.querySelector('#fTitle').textContent = orig ? '記録を編集' : (d.t === 'e' ? '支出を入力' : '収入を入力');
@@ -1775,6 +1796,7 @@ function openTxSheet(orig) {
     sheet.querySelector('#fCats').innerHTML = items.length
       ? items.map(c => `<button type="button" class="chip" data-c="${esc(c.id)}" aria-pressed="${c.id === d.c}"><i class="dot" style="background:${c.color}"></i>${esc(c.name)}</button>`).join('')
       : '<span class="muted">カテゴリがありません。設定から追加してください。</span>';
+    paintFuru();
   };
   const paintHint = () => {
     const h = sheet.querySelector('#fHint'), a = pointAcctOf({p:d.p});
@@ -1823,9 +1845,10 @@ function openTxSheet(orig) {
     if (!a) { err('金額を入力してください。'); fAmt.focus(); return; }
     if (!d.c) { err('カテゴリを選んでください。'); return; }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(fDate.value)) { err('日付を入力してください。'); fDate.focus(); return; }
-    const tx = {id: orig ? orig.id : uid(), d: fDate.value, t: d.t, c: d.c, a, p: d.p, n: fMemo.value.trim().slice(0,80), s: orig ? (orig.s || Date.now()) : Date.now()};
+    const tx = {id: orig ? orig.id : uid(), d: fDate.value, t: d.t, c: d.c, a, p: d.p, n: (furuOn() ? fMemo.value.trim().slice(0,120) : fMemo.value.replace(/\s*\n\s*/g, ' ').trim().slice(0,80)), s: orig ? (orig.s || Date.now()) : Date.now()};
     if (orig && orig.mf) tx.mf = orig.mf;
     if (orig && orig.r) tx.r = orig.r;
+    if (furuOn() && fDest.value.trim()) tx.f = fDest.value.trim().slice(0,40);
     if (d.t === 'e' && (d.rec || (orig && orig.rid))) {                // 毎月の系列。チェックが無ければ停止（系列は覚えておく）
       tx.rid = (orig && orig.rid) || uid();
       tx.rd = (orig && orig.rd && orig.d === tx.d) ? orig.rd : Number(tx.d.slice(8));
@@ -2883,7 +2906,7 @@ function mergeFromSheet(res, wasEmpty) {
     const t = r.t === 'i' ? 'i' : 'e';
     const tx = cleanTx({id:r.id, d:r.d, t, c:resolveCat(r.cn, r.c, t, created), a:r.a, p:resolvePay(r.pn, r.p, created), n:r.n, s:local ? local.s : Date.now(), u:r.u});
     if (!tx) continue;
-    if (local) { dropTx(r.id); touched.add(local.d.slice(0,7)); st.upd++; if (local.mf) tx.mf = local.mf; if (local.r) tx.r = local.r; if (local.rid) { tx.rid = local.rid; tx.rd = local.rd; if (local.rec) tx.rec = 1; } } else st.add++;
+    if (local) { dropTx(r.id); touched.add(local.d.slice(0,7)); st.upd++; if (local.mf) tx.mf = local.mf; if (local.f) tx.f = local.f; if (local.r) tx.r = local.r; if (local.rid) { tx.rid = local.rid; tx.rd = local.rd; if (local.rec) tx.rec = 1; } } else st.add++;
     putTx(tx); touched.add(tx.d.slice(0,7));
     delete S.dels[r.id];
   }

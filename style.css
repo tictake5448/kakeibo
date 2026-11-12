@@ -340,3 +340,9 @@ input[type=date]::-webkit-datetime-edit{padding:0}
 .hint{margin:8px 2px 0;font-size:13px;color:var(--muted)}
 .hint b{font-variant-numeric:tabular-nums;color:var(--text)}
 .hint.low b.after{color:#D9534F}
+
+textarea.memo{min-height:46px;height:46px;font-family:inherit;font-size:16px;line-height:1.4;resize:none}
+textarea.memo.tall{min-height:138px;height:138px}
+.dests{list-style:none;margin:6px 0 2px 16px;padding:0;font-size:13px;color:var(--muted)}
+.dests li{display:flex;justify-content:space-between;gap:12px;padding:2px 0}
+.dests .num{font-variant-numeric:tabular-nums;color:var(--ink)}
