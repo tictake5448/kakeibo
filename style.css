@@ -349,3 +349,12 @@ textarea.memo.tall{min-height:138px;height:138px}
 
 .cx-warn{color:var(--warn,#C98A1B);font-weight:700}
 .cx-bad{color:var(--expense);font-weight:700}
+
+.avgbox{margin:0 0 10px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+.avgtitle{font-size:13px;color:var(--muted);margin-bottom:6px}
+.avgrow{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:6px 0;border-top:1px solid var(--line)}
+.avgrow:first-of-type{border-top:0}
+.avgname{display:flex;flex-direction:column;font-weight:600;min-width:0;overflow-wrap:anywhere}
+.avgname small,.avgpx small{font-weight:400;font-size:12px;color:var(--muted)}
+.avgpx{display:flex;flex-direction:column;align-items:flex-end;font-variant-numeric:tabular-nums}
+.avgpx b{font-size:17px}

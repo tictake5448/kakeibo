@@ -1,7 +1,7 @@
 (() => {
 'use strict';
 /* ===== 定数 ===== */
-const APP_VERSION = '1.18.0';
+const APP_VERSION = '1.19.0';
 const PAL = ['#D9534F','#E8943A','#D2AE2F','#7FB04A','#3FA37A','#2FA4B5','#4B8BDB','#6C6FD6','#9B6BD3','#CB5FA8','#8A8F98','#A07A55'];
 const DEFAULT_CATS = [
   ['food','食費','e',1],['daily','日用品','e',2],['transport','交通費','e',6],['rent','住居','e',7],
@@ -1734,6 +1734,21 @@ function toggleTrade(id) {
   saveMeta(); scheduleSync(); renderTrades();
   toast(t.done ? '決済済みにしました' : '未決済に戻しました', {action:'元に戻す', fn: () => { t.done = was.done; t.sd = was.sd; t.u = Date.now(); saveMeta(); scheduleSync(); renderTrades(); }});
 }
+/* 未売却の株の「平均取得単価」。銘柄名が全く同じもの（前後の空白だけ無視）を合算する：Σ(買い単価×株数) ÷ Σ株数 */
+function avgCostHtml(open) {
+  const g = new Map();
+  for (const t of open) {
+    const k = String(t.name || '').trim();
+    const e = g.get(k) || {name:k, q:0, cost:0, n:0};
+    e.q += t.bq; e.cost += t.bp * t.bq; e.n++;
+    g.set(k, e);
+  }
+  if (!g.size) return '';
+  const list = [...g.values()].sort((a, b) => b.cost - a.cost);
+  const px = n => '¥' + (Math.round(n * 100) / 100).toLocaleString('ja-JP', {maximumFractionDigits:2});
+  return `<div class="avgbox"><div class="avgtitle">未売却の平均取得単価（銘柄名が同じものを合算）</div>${list.map(e => `
+    <div class="avgrow"><span class="avgname">${esc(e.name || '（銘柄名なし）')}<small>${e.n}件・${esc(fmtQty(e.q, 4))}株</small></span><span class="avgpx"><b>${px(e.cost / e.q)}</b><small>取得 ${yen(Math.round(e.cost))}</small></span></div>`).join('')}</div>`;
+}
 function renderTrades() {
   const box = $('#trade');
   if (!store.loaded) { box.innerHTML = '<div class="card"><p class="muted" style="margin:0">読み込み中…</p></div>'; return; }
@@ -1789,6 +1804,7 @@ function renderTrades() {
   const sOpen = stk.filter(t => t.sp === null && !t.done);
   const stkHtml = head('株', stk.length, 'stock') + (stk.length ? `
     <div class="esum"><span>確定した差額 <b class="${diffCls(sRealized)}">${signedYen(sRealized)}</b>（売却${stk.filter(t => t.sp !== null).length}件）</span><span>未売却 <b>${sOpen.length}件</b>・買い金額 <b>${yen(sOpen.reduce((s, t) => s + tradeCost(t), 0))}</b></span></div>
+    ${avgCostHtml(sOpen)}
     <div class="escroll" role="table" aria-label="株のトレード一覧"><div class="etable">
       <div class="etr ttr stk ehead" role="row"><span class="ec c-chk"><span class="sr">決済済み</span></span><span class="ec c-title">銘柄</span><span class="ec c-run">購入日</span><span class="ec c-due">売買日</span><span class="ec c-num">買い単価</span><span class="ec c-num">枚数</span><span class="ec c-num">売り単価</span><span class="ec c-num">枚数</span><span class="ec c-num">差額</span></div>
       ${sortList(stk).map(stkRow).join('')}
